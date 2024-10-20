@@ -143,11 +143,12 @@ class PyRIIDModel:
     def _update_custom_objects(self, key, value):
         self._custom_objects.update({key: value})
 
-    def load(self, model_path: str):
+    def load(self, model_path: str, load_checkpoint=False):
         """Load the model from a path.
 
         Args:
             model_path: path from which to load the model.
+            load_checkpoint: whether to load the optimizer and model state from a checkpoint.
         """
         if not os.path.exists(model_path):
             raise ValueError("Model file does not exist.")
@@ -160,12 +161,22 @@ class PyRIIDModel:
         self.model.set_weights([np.array(x) for x in model["weights"]])
         self.info = model["info"]
 
-    def save(self, model_path: str, overwrite=False):
+        if load_checkpoint:
+            checkpoint_dir = str(Path(model_path).with_suffix("")) + "_checkpoints"
+            latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
+            if latest_checkpoint:
+                checkpoint = tf.train.Checkpoint(model=self.model, optimizer=self.model.optimizer)
+                checkpoint.restore(latest_checkpoint).assert_consumed()
+            else:
+                raise ValueError("No valid checkpoint found.")
+
+    def save(self, model_path: str, overwrite=False, save_checkpoint=False):
         """Save the model to a path.
 
         Args:
             model_path: path at which to save the model.
             overwrite: whether to overwrite an existing file if it already exists.
+            save_checkpoint: whether to save the optimizer and model state as a checkpoint.
 
         Raises:
             `ValueError` when the given path already exists
@@ -176,6 +187,13 @@ class PyRIIDModel:
         model_str = self._get_model_str()
         with open(model_path, "w") as fout:
             fout.write(model_str)
+
+        if save_checkpoint:
+            checkpoint_dir = str(Path(model_path).with_suffix("")) + "_checkpoints"
+            os.makedirs(checkpoint_dir, exist_ok=True)
+
+            checkpoint = tf.train.Checkpoint(model=self.model, optimizer=self.model.optimizer)
+            checkpoint.save(Path(checkpoint_dir) / "ckpt")
 
     def to_onnx(self, model_path, **tf2onnx_kwargs: dict):
         """Convert the model to an ONNX model.
