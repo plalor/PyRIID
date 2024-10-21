@@ -116,10 +116,15 @@ class PyRIIDModel:
         model_json = self.model.to_json()
         model_dict = json.loads(model_json)
         model_weights = self.model.get_weights()
+        optimizer_config = self.model.optimizer.get_config()
+        optimizer_weights = [var.numpy().tolist() for var in self.model.optimizer.variables]
+
         model_dict = {
             "info": self._info,
             "model": model_dict,
             "weights": model_weights,
+            "optimizer_config": optimizer_config,
+            "optimizer_weights": optimizer_weights
         }
         return model_dict
 
@@ -143,12 +148,11 @@ class PyRIIDModel:
     def _update_custom_objects(self, key, value):
         self._custom_objects.update({key: value})
 
-    def load(self, model_path: str, load_checkpoint=False):
+    def load(self, model_path: str):
         """Load the model from a path.
 
         Args:
             model_path: path from which to load the model.
-            load_checkpoint: whether to load the optimizer and model state from a checkpoint.
         """
         if not os.path.exists(model_path):
             raise ValueError("Model file does not exist.")
@@ -161,22 +165,19 @@ class PyRIIDModel:
         self.model.set_weights([np.array(x) for x in model["weights"]])
         self.info = model["info"]
 
-        if load_checkpoint:
-            checkpoint_dir = str(Path(model_path).with_suffix("")) + "_checkpoints"
-            latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
-            if latest_checkpoint:
-                checkpoint = tf.train.Checkpoint(model=self.model, optimizer=self.model.optimizer)
-                checkpoint.restore(latest_checkpoint).assert_consumed()
-            else:
-                raise ValueError("No valid checkpoint found.")
+        optimizer_config = model["optimizer_config"]
+        optimizer_weights = [np.array(x) for x in model["optimizer_weights"]]
+        self.model.optimizer = tf.keras.optimizers.get(optimizer_config["name"]).from_config(optimizer_config)
+        self.model.optimizer.build(self.model.trainable_variables)
+        for var, weight in zip(self.model.optimizer.variables, optimizer_weights):
+            var.assign(weight)
 
-    def save(self, model_path: str, overwrite=False, save_checkpoint=False):
+    def save(self, model_path: str, overwrite=False):
         """Save the model to a path.
 
         Args:
             model_path: path at which to save the model.
             overwrite: whether to overwrite an existing file if it already exists.
-            save_checkpoint: whether to save the optimizer and model state as a checkpoint.
 
         Raises:
             `ValueError` when the given path already exists
@@ -187,13 +188,6 @@ class PyRIIDModel:
         model_str = self._get_model_str()
         with open(model_path, "w") as fout:
             fout.write(model_str)
-
-        if save_checkpoint:
-            checkpoint_dir = str(Path(model_path).with_suffix("")) + "_checkpoints"
-            os.makedirs(checkpoint_dir, exist_ok=True)
-
-            checkpoint = tf.train.Checkpoint(model=self.model, optimizer=self.model.optimizer)
-            checkpoint.save(Path(checkpoint_dir) / "ckpt")
 
     def to_onnx(self, model_path, **tf2onnx_kwargs: dict):
         """Convert the model to an ONNX model.
