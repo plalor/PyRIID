@@ -804,6 +804,19 @@ class SampleSet():
         )
         self._spectra[self._spectra < min_frac] = 0
 
+    def set_max_energy(self, E_max: int = 1500):
+        """Removes all bins above the max energy"""
+        if (self.info["ecal_low_e"] != 0).any():
+            raise NotImplementedError("Can't rebin if ecal_low_e != 0")
+
+        mask = self.get_channel_energies(0) <= E_max
+        self.spectra = self.spectra.iloc[:,mask]
+
+        old_E_max = self.get_channel_energies(0)[-1]
+        self.info["ecal_order_1"] = self.info["ecal_order_1"] * (E_max / old_E_max)
+        self.info["ecal_order_2"] = self.info["ecal_order_2"] * (E_max / old_E_max)**2
+        self.info["ecal_order_3"] = self.info["ecal_order_3"] * (E_max / old_E_max)**3
+
     def drop_sources(self, col_names: Iterable = DEFAULT_BG_SEED_NAMES,
                      normalize_sources: bool = True,
                      target_level: str = "Seed"):
@@ -1445,11 +1458,12 @@ class SampleSet():
                 transformation.T))
 
 
-def read_hdf(path: str) -> SampleSet:
+def read_hdf(path: str, row_slice: tuple[int, int] = None) -> SampleSet:
     """Read an HDF file in as a `SampleSet` object.
 
     Args:
         path: path for the HDF file to be read in
+        row_slice: (start, stop) tuple to load the `SampleSet`
 
     Returns:
         `SampleSet` object
@@ -1458,7 +1472,7 @@ def read_hdf(path: str) -> SampleSet:
     if not os.path.isfile(expanded_path):
         raise FileNotFoundError(f"No file found at location '{expanded_path}'.")
 
-    ss = _read_hdf(expanded_path)
+    ss = _read_hdf(expanded_path, row_slice)
 
     if not ss:
         raise FileNotFoundError(f"No data found at location '{expanded_path}'.")
@@ -1595,26 +1609,27 @@ def _validate_hdf_store_keys(keys: list):
                 raise InvalidSampleSetFileError()
 
 
-def _read_hdf(path: str) -> SampleSet:
+def _read_hdf(path: str, row_slice: tuple[int, int] = None) -> SampleSet:
     """Read `SampleSet` from an HDF file.
 
     Args:
         path: path where HDF file is to be read from
+        row_slice: (start, stop) tuple to load the `SampleSet`
 
     Returns:
         `SampleSet` object
     """
-    store = pd.HDFStore(path, mode="r")
-    store_keys = store.keys()
-    _validate_hdf_store_keys(store_keys)
+    with pd.HDFStore(path, mode="r") as store:
+        store_keys = store.keys()
+        _validate_hdf_store_keys(store_keys)
+        start, stop = row_slice if row_slice else (None, None)
 
-    # Pull data from data store
-    spectra = store.get("spectra")
-    info = store.get("info")
-    sources = store.get("sources")
-    prediction_probas = store.get("prediction_probas")
-    other_info = store.get("other_info")
-    store.close()
+        # Pull data from data store
+        spectra = store.select("spectra", start=start, stop=stop)
+        sources = store.select("sources", start=start, stop=stop)
+        prediction_probas = store.select("prediction_probas", start=start, stop=stop)
+        info = store.select("info", start=start, stop=stop)
+        other_info = store.get("other_info")
 
     # Build SampleSet object
     ss = SampleSet()
