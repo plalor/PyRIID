@@ -19,12 +19,14 @@ import riid
 from riid import SampleSet, SpectraState
 from riid.data.labeling import label_to_index_element
 from riid.losses import mish
+from riid.losses.sparsemax import sparsemax
 from riid.metrics import multi_f1, single_f1
 
 get_custom_objects().update({
     "multi_f1": multi_f1,
     "single_f1": single_f1,
     "mish": mish,
+    "sparsemax": sparsemax,
 })
 
 
