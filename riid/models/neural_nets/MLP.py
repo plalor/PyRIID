@@ -24,7 +24,7 @@ class MLP(PyRIIDModel):
     def __init__(self, activation=None, loss=None, optimizer=None,
                  metrics=None, l2_alpha: float = 1e-4,
                  activity_regularizer=None, final_activation=None,
-                 hidden_layers=None, dropout=None):
+                 hidden_layers=None, dropout=0):
         """
         Args:
             activation: activate function to use for each dense layer
@@ -60,8 +60,6 @@ class MLP(PyRIIDModel):
             self.activity_regularizer = l1(0.0)
         if self.final_activation is None:
             self.final_activation = sparsemax
-        if self.hidden_layers is None:
-            self.hidden_layers = (4096,)
 
         self.model = None
         self._set_predict_fn()
@@ -127,7 +125,7 @@ class MLP(PyRIIDModel):
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
             if self.hidden_layers is None:
-                self.hidden_layers = (input_shape // 2,)
+                self.hidden_layers = (input_shape//2,)
             x = inputs
             for layer, nodes in enumerate(self.hidden_layers):
                 x = Dense(
@@ -138,7 +136,7 @@ class MLP(PyRIIDModel):
                     name=f"dense_{layer}"
                 )(x)
                 
-                if self.dropout is not None:
+                if self.dropout > 0:
                     x = Dropout(self.dropout)(x)
 
             outputs = Dense(Y_train.shape[1], activation=self.final_activation)(x)
