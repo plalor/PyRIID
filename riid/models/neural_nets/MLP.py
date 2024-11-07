@@ -8,7 +8,7 @@ import tensorflow as tf
 from keras.utils import Sequence
 from keras.api.callbacks import EarlyStopping
 from keras.api.layers import Dense, Input, Dropout
-from keras.api.losses import CategoricalCrossentropy
+from keras.api.losses import CategoricalCrossentropy, MeanAbsoluteError
 from keras.api.models import Model
 from keras.api.optimizers import Adam
 from keras.api.regularizers import l1, l2
@@ -223,3 +223,11 @@ class MLP(PyRIIDModel):
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
         f1_score = multi_f1(y_true, y_pred).numpy()
         return f1_score
+
+    def calc_absolute_error(self, ss: SampleSet, target_level="Isotope"):
+        """Calculated the prediction total absolute error score on ss"""
+        self.predict(ss)
+        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
+        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
+        MAE = MeanAbsoluteError()(y_true, y_pred).numpy()
+        return y_true.shape[1]*MAE
