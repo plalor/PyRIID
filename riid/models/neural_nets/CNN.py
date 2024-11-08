@@ -1,13 +1,13 @@
 # Copyright 2021 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
 # Under the terms of Contract DE-NA0003525 with NTESS,
 # the U.S. Government retains certain rights in this software.
-"""This module contains a simple neural network."""
+"""This module contains a simple CNN."""
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from keras.utils import Sequence
 from keras.api.callbacks import EarlyStopping
-from keras.api.layers import Dense, Input, Dropout
+from keras.api.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten
 from keras.api.losses import CategoricalCrossentropy, MeanAbsoluteError
 from keras.api.models import Model
 from keras.api.optimizers import Adam
@@ -18,12 +18,12 @@ from riid.models.base import ModelInput, PyRIIDModel
 from riid.metrics import multi_f1
 
 
-class MLP(PyRIIDModel):
-    """Multi-layer perceptron classifier."""
+class CNN(PyRIIDModel):
+    """Convolutional neural network classifier."""
     def __init__(self, activation=None, loss=None, optimizer=None,
                  metrics=None, l2_alpha: float = 1e-4,
                  activity_regularizer=None, final_activation=None,
-                 hidden_layers=None, dropout=0):
+                 hidden_layers=None, dense_layer_size=None, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -33,7 +33,8 @@ class MLP(PyRIIDModel):
             l2_alpha: alpha value for the L2 regularization of each dense layer
             activity_regularizer: regularizer function applied each dense layer output
             final_activation: final activation function to apply to model output
-            hidden_layers: hidden layer structure of the MLP
+            hidden_layers: (filter, kernel_size) of each hidden laye of the CNN
+            dense_layer_size: size of the final dense layer after the convolutional layers
             dropout: optional droupout layer after each hidden layer
         """
         super().__init__()
@@ -46,6 +47,7 @@ class MLP(PyRIIDModel):
         self.activity_regularizer = activity_regularizer
         self.final_activation = final_activation
         self.hidden_layers = hidden_layers
+        self.dense_layer_size = dense_layer_size
         self.dropout = dropout
 
         if self.activation is None:
@@ -76,6 +78,7 @@ class MLP(PyRIIDModel):
                 are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
+            validation_split: percentage of the training data to use as validation data
             callbacks: list of callbacks to be passed to the TensorFlow `Model.fit()` method
             patience: number of epochs to wait for `EarlyStopping` object
             es_monitor: quantity to be monitored for `EarlyStopping` object
@@ -124,22 +127,30 @@ class MLP(PyRIIDModel):
 
         if not self.model:
             input_shape = X_train.shape[1]
-            inputs = Input(shape=(input_shape,), name="Spectrum")
+            inputs = Input(shape=(input_shape,1), name="Spectrum")
             if self.hidden_layers is None:
-                self.hidden_layers = (input_shape//2,)
+                self.hidden_layers = [(32, 5), (64, 3)]
             x = inputs
-            for layer, nodes in enumerate(self.hidden_layers):
-                x = Dense(
-                    nodes,
+            for layer, (filters, kernel_size) in enumerate(self.hidden_layers):
+                x = Conv1D(
+                    filters=filters,
+                    kernel_size=kernel_size,
                     activation=self.activation,
                     activity_regularizer=self.activity_regularizer,
                     kernel_regularizer=l2(self.l2_alpha),
-                    name=f"dense_{layer}"
+                    name=f"conv_{layer}"
                 )(x)
+                x = MaxPooling1D(pool_size=2)(x)
                 
                 if self.dropout > 0:
                     x = Dropout(self.dropout)(x)
 
+            x = Flatten()(x)
+            if self.dense_layer_size is None:
+                self.dense_layer_size = (input_shape//2,)
+            x = Dense(self.dense_layer_size, activation=self.activation)(x)
+            if self.dropout > 0:
+                x = Dropout(self.dropout)(x)
             outputs = Dense(Y_train.shape[1], activation=self.final_activation)(x)
             self.model = Model(inputs, outputs)
             self.model.compile(loss=self.loss, optimizer=self.optimizer,

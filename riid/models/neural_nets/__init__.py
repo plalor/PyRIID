@@ -5,5 +5,6 @@
 from riid.models.neural_nets.basic import MLPClassifier
 from riid.models.neural_nets.lpe import LabelProportionEstimator
 from riid.models.neural_nets.MLP import MLP
+from riid.models.neural_nets.CNN import CNN
 
 __all__ = ["LabelProportionEstimator", "MLPClassifier"]
