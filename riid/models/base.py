@@ -122,6 +122,7 @@ class PyRIIDModel:
             "info": self._info,
             "model": model_dict,
             "weights": model_weights,
+            "history": self.model.history.history
         }
         return model_dict
 
@@ -161,6 +162,7 @@ class PyRIIDModel:
         self.model = tf.keras.models.model_from_json(model_str, custom_objects=self._custom_objects)
         self.model.set_weights([np.array(x) for x in model["weights"]])
         self.info = model["info"]
+        self.history = model.get("history", None)
 
     def save(self, model_path: str, overwrite=False):
         """Save the model to a path.
