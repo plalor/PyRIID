@@ -122,7 +122,7 @@ class PyRIIDModel:
             "info": self._info,
             "model": model_dict,
             "weights": model_weights,
-            "history": self.model.history.history
+            "history": self.history
         }
         return model_dict
 

@@ -1,32 +1,30 @@
 # Copyright 2021 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
 # Under the terms of Contract DE-NA0003525 with NTESS,
 # the U.S. Government retains certain rights in this software.
-"""This module contains a simple transformer."""
+"""This module contains a simple neural network."""
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from keras.utils import Sequence
 from keras.api.callbacks import EarlyStopping
-from keras.api import layers
-from keras.api.layers import Dense, Input, Dropout, Flatten
+from keras.api.layers import Dense, Input, Dropout, Reshape, LSTM, Bidirectional, Reshape, Flatten
 from keras.api.losses import CategoricalCrossentropy, MeanAbsoluteError
 from keras.api.models import Model
 from keras.api.optimizers import Adam
 from keras.api.regularizers import l1, l2
-from sklearn.preprocessing import StandardScaler
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
 from riid.metrics import multi_f1
 
 
-class Transformer(PyRIIDModel):
-    """Multi-layer perceptron classifier."""
+class LSTMClassifier(PyRIIDModel):
+    """LSTM classifier."""
     def __init__(self, activation=None, loss=None, optimizer=None,
                  metrics=None, l2_alpha: float = 1e-4,
                  activity_regularizer=None, final_activation=None,
-                 embed_dim=None, num_heads=None, ff_dim=None, num_layers=None, 
-                 patch_size=None, dropout=0):
+                 hidden_layers=None, patch_size=None, bidirectional=False, 
+                 dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -36,15 +34,11 @@ class Transformer(PyRIIDModel):
             l2_alpha: alpha value for the L2 regularization of each dense layer
             activity_regularizer: regularizer function applied each dense layer output
             final_activation: final activation function to apply to model output
+            hidden_layers: hidden layer structure of the MLP
             dropout: optional droupout layer after each hidden layer
-            embed_dim: size of the embedding vector
-            num_heads: number of attention heads
-            ff_dim: dimension of feed-forward network
-            num_layers: number of transformer blocks
         """
         super().__init__()
 
-        self.activation = activation
         self.loss = loss
         self.optimizer = optimizer
         self.metrics = metrics
@@ -52,15 +46,11 @@ class Transformer(PyRIIDModel):
         self.activity_regularizer = activity_regularizer
         self.final_activation = final_activation
 
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.ff_dim = ff_dim
-        self.num_layers = num_layers
+        self.hidden_layers = hidden_layers
         self.patch_size = patch_size
+        self.bidirectional = bidirectional
         self.dropout = dropout
 
-        if self.activation is None:
-            self.activation = "relu"
         if self.loss is None:
             self.loss = CategoricalCrossentropy()
         if optimizer is None:
@@ -74,7 +64,6 @@ class Transformer(PyRIIDModel):
 
         self.model = None
         self._set_predict_fn()
-
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size: int = 200,
             epochs: int = 20, callbacks = None, patience: int = 10, es_monitor: str = "val_loss",
@@ -138,30 +127,37 @@ class Transformer(PyRIIDModel):
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
             seq_length = input_shape // self.patch_size
-            x = layers.Reshape((seq_length, self.patch_size))(inputs)
-            x = Dense(self.embed_dim)(x)
+            x = Reshape((seq_length, self.patch_size))(inputs)
 
-            positions = tf.range(start=0, limit=seq_length, delta=1)
-            position_embedding = layers.Embedding(input_dim=seq_length, output_dim=self.embed_dim)(positions)
-            x = x + position_embedding
-
-            for layer in range(self.num_layers):
-                attention_output = layers.MultiHeadAttention(num_heads=self.num_heads, 
-                                                key_dim=self.embed_dim // self.num_heads,
-                                                name=f"multi_head_attention_{layer}")(x, x)
-                if self.dropout > 0:
-                    attention_output = Dropout(self.dropout)(attention_output)
-                attention_output = layers.LayerNormalization(epsilon=1e-6)(x + attention_output)
-                ffn_output = layers.Dense(self.ff_dim, activation=self.activation, name=f"ffn_dense1_{layer}")(attention_output)
-                ffn_output = layers.Dense(self.embed_dim, name=f"ffn_dense2_{layer}")(ffn_output)
-                if self.dropout > 0:
-                    attention_output = Dropout(self.dropout)(attention_output)
-                x = layers.LayerNormalization(epsilon=1e-6)(attention_output + ffn_output)
-            
-            x = layers.GlobalAveragePooling1D()(x)
-            if self.dropout > 0:
-                x = Dropout(self.dropout)(x)
-
+            for layer, units in enumerate(self.hidden_layers):
+                return_sequences = layer < len(self.hidden_layers) - 1
+                if self.bidirectional:
+                    lstm_layer = Bidirectional(
+                        LSTM(units // 2,
+                             activation='tanh',
+                             recurrent_activation='sigmoid',
+                             kernel_regularizer=l2(self.l2_alpha),
+                             activity_regularizer=self.activity_regularizer,
+                             dropout=self.dropout,
+                             recurrent_dropout=self.dropout,
+                             return_sequences=return_sequences,
+                             name=f"lstm_{layer}",
+                        ),
+                        name=f"bidirectional_lstm_{layer}"
+                    )
+                else:
+                    lstm_layer = LSTM(units,
+                             activation='tanh',
+                             recurrent_activation='sigmoid',
+                             kernel_regularizer=l2(self.l2_alpha),
+                             activity_regularizer=self.activity_regularizer,
+                             dropout=self.dropout,
+                             recurrent_dropout=self.dropout,
+                             return_sequences=return_sequences,
+                             name=f"lstm_{layer}",
+                            )
+                x = lstm_layer(x)
+            x = Flatten()(x)
             outputs = Dense(Y_train.shape[1], activation=self.final_activation)(x)
             self.model = Model(inputs, outputs)
             self.model.compile(loss=self.loss, optimizer=self.optimizer,

@@ -7,5 +7,6 @@ from riid.models.neural_nets.lpe import LabelProportionEstimator
 from riid.models.neural_nets.MLP import MLP
 from riid.models.neural_nets.CNN import CNN
 from riid.models.neural_nets.Transformer import Transformer
+from riid.models.neural_nets.LSTM import LSTMClassifier
 
 __all__ = ["LabelProportionEstimator", "MLPClassifier"]

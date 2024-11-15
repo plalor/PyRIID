@@ -45,6 +45,7 @@ class MLP(PyRIIDModel):
         self.l2_alpha = l2_alpha
         self.activity_regularizer = activity_regularizer
         self.final_activation = final_activation
+
         self.hidden_layers = hidden_layers
         self.dropout = dropout
 
@@ -164,6 +165,7 @@ class MLP(PyRIIDModel):
             validation_data=validation_dataset,
             callbacks=callbacks,
          )
+        self.history = history.history
 
         # Update model information
         self._update_info(
