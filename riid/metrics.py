@@ -30,6 +30,49 @@ def multi_f1(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return ops.mean(true_positive)
 
 
+def APE_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Calculates the absolute proportion error score of two tensors, defined by
+    rescaling the MSE to yield a value between 0 and 1
+
+    Values for `y_true` and `y_pred` are assumed to sum to 1.
+
+    Args:
+        y_true: list of ground truth
+        y_pred: list of predictions to compare against the ground truth
+
+    Returns:
+        APE-score value(s)
+
+    """
+    from keras.api import ops
+
+    abs_diff = ops.abs(y_true - y_pred)
+    avg_total_abs_error = ops.mean(ops.sum(abs_diff, axis=1))
+    ape = 1 - avg_total_abs_error / 2
+    return ape
+
+
+def cosine_similarity(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Calculates the average cosine similarity score of two tensors.
+
+    Args:
+        y_true: list of ground truth
+        y_pred: list of predictions to compare against the ground truth
+
+    Returns:
+        APE-score value(s)
+
+    """
+    from keras.api import ops
+
+    y_true = ops.cast(y_true, 'float32')
+    dot_products = ops.sum(y_true * y_pred, axis=1)
+    norms_true = ops.sqrt(ops.sum(ops.square(y_true), axis=1))
+    norms_pred = ops.sqrt(ops.sum(ops.square(y_pred), axis=1))
+    cosine_similarities = ops.divide(dot_products, norms_true * norms_pred)
+    return ops.mean(cosine_similarities)
+
+
 def single_f1(y_true: np.ndarray, y_pred: np.ndarray):
     """Compute the weighted F1 score for the maximum prediction and maximum ground truth.
 

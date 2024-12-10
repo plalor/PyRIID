@@ -17,11 +17,11 @@ from sklearn.preprocessing import StandardScaler
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.metrics import multi_f1
+from riid.metrics import APE_score, cosine_similarity
 
 
 class Transformer(PyRIIDModel):
-    """Multi-layer perceptron classifier."""
+    """Transformer classifier."""
     def __init__(self, activation=None, loss=None, optimizer=None,
                  metrics=None, l2_alpha: float = 1e-4,
                  activity_regularizer=None, final_activation=None,
@@ -66,7 +66,7 @@ class Transformer(PyRIIDModel):
         if optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
         if self.metrics is None:
-            self.metrics = [multi_f1, MeanAbsoluteError()]
+            self.metrics = [APE_score]
         if self.activity_regularizer is None:
             self.activity_regularizer = l1(0.0)
         if self.final_activation is None:
@@ -240,21 +240,21 @@ class Transformer(PyRIIDModel):
 
         ss.classified_by = self.model_id
 
-    def calc_f1_score(self, ss: SampleSet, target_level="Isotope"):
+    def calc_APE_score(self, ss: SampleSet, target_level="Isotope"):
         """Calculated the prediction F1 score on ss"""
         self.predict(ss)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        f1_score = multi_f1(y_true, y_pred).numpy()
-        return f1_score
+        ape = APE_score(y_true, y_pred).numpy()
+        return ape
 
-    def calc_absolute_error(self, ss: SampleSet, target_level="Isotope"):
+    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope"):
         """Calculated the prediction total absolute error score on ss"""
         self.predict(ss)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        MAE = MeanAbsoluteError()(y_true, y_pred).numpy()
-        return y_true.shape[1]*MAE
+        cosine_score = cosine_similarity(y_true, y_pred).numpy()
+        return cosine_score
 
     def calc_loss(self, ss: SampleSet, target_level="Isotope"):
         """Calculated the prediction total absolute error score on ss"""
