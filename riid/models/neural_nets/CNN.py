@@ -1,21 +1,17 @@
-# Copyright 2021 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS,
-# the U.S. Government retains certain rights in this software.
-"""This module contains a simple CNN."""
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from keras.utils import Sequence
-from keras.api.callbacks import EarlyStopping
-from keras.api.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten
-from keras.api.losses import CategoricalCrossentropy, MeanAbsoluteError
-from keras.api.models import Model
-from keras.api.optimizers import Adam
-from keras.api.regularizers import l1, l2
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten
+from tensorflow.keras.losses import CategoricalCrossentropy, cosine_similarity
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.regularizers import l1, l2
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.metrics import APE_score, cosine_similarity
+from riid.metrics import APE_score
 
 
 class CNN(PyRIIDModel):
@@ -79,7 +75,6 @@ class CNN(PyRIIDModel):
                 are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
-            validation_split: percentage of the training data to use as validation data
             callbacks: list of callbacks to be passed to the TensorFlow `Model.fit()` method
             patience: number of epochs to wait for `EarlyStopping` object
             es_monitor: quantity to be monitored for `EarlyStopping` object
@@ -118,8 +113,7 @@ class CNN(PyRIIDModel):
         training_dataset = training_dataset.batch(batch_size=batch_size)
 
         X_validation = validation_ss.get_samples()
-        source_contributions_df_validation = validation_ss.sources.T.groupby(target_level, sort=False).sum().T
-        Y_validation = source_contributions_df_validation.values
+        Y_validation = validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values
 
         spectra_tensor_validation = tf.convert_to_tensor(X_validation, dtype=tf.float32)
         labels_tensor_validation = tf.convert_to_tensor(Y_validation, dtype=tf.float32)
@@ -231,7 +225,7 @@ class CNN(PyRIIDModel):
         ss.classified_by = self.model_id
 
     def calc_APE_score(self, ss: SampleSet, target_level="Isotope"):
-        """Calculated the prediction F1 score on ss"""
+        """Calculate the prediction APE score on ss"""
         self.predict(ss)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
@@ -239,17 +233,18 @@ class CNN(PyRIIDModel):
         return ape
 
     def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope"):
-        """Calculated the prediction total absolute error score on ss"""
+        """Calculate the prediction cosine similarity score on ss"""
         self.predict(ss)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        cosine_score = cosine_similarity(y_true, y_pred).numpy()
+        cosine_sim = cosine_similarity(y_true, y_pred)
+        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
         return cosine_score
 
     def calc_loss(self, ss: SampleSet, target_level="Isotope"):
-        """Calculated the prediction total absolute error score on ss"""
+        """Calculate the loss on ss"""
         self.predict(ss)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
+        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values        
         loss = self.model.loss(y_true, y_pred).numpy()
         return loss
