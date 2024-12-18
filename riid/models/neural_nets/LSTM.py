@@ -100,23 +100,19 @@ class LSTMClassifier(PyRIIDModel):
         else:
             raise ValueError(f"{training_ss.spectra_type} is not supported in this model.")
                 
-        X_train = training_ss.get_samples()
+        X_train = training_ss.get_samples().astype("float32")
         source_contributions_df_train = training_ss.sources.T.groupby(target_level, sort=False).sum().T
         model_outputs = source_contributions_df_train.columns.values.tolist()
-        Y_train = source_contributions_df_train.values
+        Y_train = source_contributions_df_train.values.astype("float32")
 
-        spectra_tensor_train = tf.convert_to_tensor(X_train, dtype=tf.float32)
-        labels_tensor_train = tf.convert_to_tensor(Y_train, dtype=tf.float32)
-        training_dataset = tf.data.Dataset.from_tensor_slices((spectra_tensor_train, labels_tensor_train))
-        training_dataset = training_dataset.batch(batch_size=batch_size)
-
-        X_validation = validation_ss.get_samples()
-        Y_validation = validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values
-
-        spectra_tensor_validation = tf.convert_to_tensor(X_validation, dtype=tf.float32)
-        labels_tensor_validation = tf.convert_to_tensor(Y_validation, dtype=tf.float32)
-        validation_dataset = tf.data.Dataset.from_tensor_slices((spectra_tensor_validation, labels_tensor_validation))
-        validation_dataset = validation_dataset.batch(batch_size=batch_size)
+        # Shuffle the training data
+        indices = np.arange(X_train.shape[0])
+        np.random.shuffle(indices)
+        X_train = X_train[indices]
+        Y_train = Y_train[indices]
+        
+        X_validation = validation_ss.get_samples().astype("float32")
+        Y_validation = validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
 
         if not self.model:
             input_shape = X_train.shape[1]
@@ -171,10 +167,12 @@ class LSTMClassifier(PyRIIDModel):
             callbacks = [es]
 
         history = self.model.fit(
-            training_dataset,
+            x=X_train,
+            y=Y_train,
+            batch_size=batch_size,
             epochs=epochs,
             verbose=verbose,
-            validation_data=validation_dataset,
+            validation_data=(X_validation, Y_validation),
             callbacks=callbacks,
          )
         self.history = history.history

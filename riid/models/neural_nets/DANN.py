@@ -112,7 +112,7 @@ class DANN(PyRIIDModel):
         ### Preparing training data
         X_source_train = source_training_ss.get_samples()
         X_target_train = target_training_ss.get_samples()
-        X_train = np.concatenate((X_source_train, X_target_train))
+        X_train = np.concatenate((X_source_train, X_target_train)).astype("float32")
                 
         # Label predictor labels (set dummy labels for target domain)
         source_contributions_df = source_training_ss.sources.T.groupby(target_level, sort=False).sum().T
@@ -120,16 +120,16 @@ class DANN(PyRIIDModel):
         predictor_labels_source_train = source_contributions_df.values
         dummy_labels = np.zeros((len(X_target_train), predictor_labels_source_train.shape[1]))
         # predictor_labels_target_train = target_training_ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        predictor_labels_train = np.concatenate((predictor_labels_source_train, dummy_labels))
+        predictor_labels_train = np.concatenate((predictor_labels_source_train, dummy_labels)).astype("float32")
         
         # Domain labels: 0 for source, 1 for target
         domain_labels_source_train = np.zeros(len(X_source_train)).reshape(-1, 1)
         domain_labels_target_train = np.ones(len(X_target_train)).reshape(-1, 1)
-        domain_labels_train = np.concatenate((domain_labels_source_train, domain_labels_target_train))
+        domain_labels_train = np.concatenate((domain_labels_source_train, domain_labels_target_train)).astype("float32")
         
         # Weights for label predictor (1 for source, 0 for target) and domain classifier (1 for all samples)
-        weights_label_predictor_train = np.concatenate((np.ones(len(X_source_train)), np.zeros(len(X_target_train))))
-        weights_domain_classifier_train = np.ones(len(X_train))
+        weights_label_predictor_train = np.concatenate((np.ones(len(X_source_train)), np.zeros(len(X_target_train)))).astype("float32")
+        weights_domain_classifier_train = np.ones(len(X_train)).astype("float32")
 
         # Shuffle the training data
         indices = np.arange(X_train.shape[0])
@@ -153,21 +153,21 @@ class DANN(PyRIIDModel):
         ### Preparing validation data
         X_source_validation = source_validation_ss.get_samples()
         X_target_validation = target_validation_ss.get_samples()
-        X_validation = np.concatenate((X_source_validation, X_target_validation))
+        X_validation = np.concatenate((X_source_validation, X_target_validation)).astype("float32")
         
         # Label predictor labels
         predictor_labels_source_validation = source_validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values
         predictor_labels_target_validation = target_validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        predictor_labels_validation = np.concatenate((predictor_labels_source_validation, predictor_labels_target_validation))
+        predictor_labels_validation = np.concatenate((predictor_labels_source_validation, predictor_labels_target_validation)).astype("float32")
         
         # Domain labels: 0 for source, 1 for target
         domain_labels_source_validation = np.zeros(len(X_source_validation)).reshape(-1, 1)
         domain_labels_target_validation = np.ones(len(X_target_validation)).reshape(-1, 1)
-        domain_labels_validation = np.concatenate((domain_labels_source_validation, domain_labels_target_validation))
+        domain_labels_validation = np.concatenate((domain_labels_source_validation, domain_labels_target_validation)).astype("float32")
 
         # Weights for label predictor (1 for source, 0 for target) and domain classifier (1 for all samples)
-        weights_label_predictor_validation = np.concatenate((np.ones(len(X_source_validation)), np.zeros(len(X_target_validation))))
-        weights_domain_classifier_validation = np.ones(len(X_validation))
+        weights_label_predictor_validation = np.concatenate((np.ones(len(X_source_validation)), np.zeros(len(X_target_validation)))).astype("float32")
+        weights_domain_classifier_validation = np.ones(len(X_validation)).astype("float32")
 
         # Prepare label and weight dictionaries
         labels_dict_validation = {
@@ -322,6 +322,31 @@ class DANN(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
+
+    def calc_APE_score(self, ss: SampleSet, target_level="Isotope"):
+        """Calculate the prediction APE score on ss"""
+        self.predict(ss)
+        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
+        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
+        ape = APE_score(y_true, y_pred).numpy()
+        return ape
+
+    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope"):
+        """Calculate the prediction cosine similarity score on ss"""
+        self.predict(ss)
+        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
+        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
+        cosine_sim = cosine_similarity(y_true, y_pred)
+        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
+        return cosine_score
+
+    def calc_loss(self, ss: SampleSet, target_level="Isotope"):
+        """Calculates the label predictor loss on ss"""
+        self.predict(ss)
+        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
+        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
+        loss = self.model.loss["label_predictor"](y_true, y_pred).numpy()
+        return loss
 
 
 class GradientReversalLayer(Layer):
