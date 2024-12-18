@@ -20,8 +20,8 @@ class DANN(PyRIIDModel):
     def __init__(self, activation=None, loss=None, optimizer=None,
                  metrics=None, l2_alpha: float = 1e-4,
                  activity_regularizer=None, final_activation=None,
-                 hidden_layers=None, dense_layer_size=None, gr_layer_size=None,
-                 hp_lambda=1.0, dropout=0):
+                 hidden_layers=None, dense_layer_size=None, grl_layer_size=None,
+                 gamma=10, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -33,8 +33,8 @@ class DANN(PyRIIDModel):
             final_activation: final activation function to apply to model output
             hidden_layers: (filter, kernel_size) of each hidden laye of the CNN
             dense_layer_size: size of the final dense layer after the convolutional layers
-            gr_layer_size: size of the gradient reversal dense layer
-            hp_lambda: lambda hyperparameter for the gradient reversal layer
+            grl_layer_size: size of the gradient reversal dense layer
+            gamma: hyperparameter for adjusting domain adaptation parameter
             dropout: optional droupout layer after each hidden layer
         """
         super().__init__()
@@ -49,8 +49,8 @@ class DANN(PyRIIDModel):
 
         self.hidden_layers = hidden_layers
         self.dense_layer_size = dense_layer_size
-        self.gr_layer_size = gr_layer_size
-        self.hp_lambda = hp_lambda
+        self.grl_layer_size = grl_layer_size
+        self.gamma = gamma
         self.dropout = dropout
 
         if self.activation is None:
@@ -59,9 +59,6 @@ class DANN(PyRIIDModel):
             self.loss = CategoricalCrossentropy()
         if optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
-        if self.metrics is None:
-            self.metrics = {"label_predictor": [APE_score],
-                            "domain_classifier": ["accuracy"]}
         if self.activity_regularizer is None:
             self.activity_regularizer = l1(0.0)
         if self.final_activation is None:
@@ -222,10 +219,11 @@ class DANN(PyRIIDModel):
                                   name="label_predictor")(x)
 
             # Domain classifier branch with GRL
-            grl = GradientReversalLayer(hp_lambda=self.hp_lambda)(x)
-            if self.gr_layer_size is None:
-                self.gr_layer_size = 100
-            domain_classifier = Dense(self.gr_layer_size, activation='relu')(grl)
+            grl_layer = GradientReversalLayer()
+            grl = grl_layer(x)
+            if self.grl_layer_size is None:
+                self.grl_layer_size = input_shape//2
+            domain_classifier = Dense(self.grl_layer_size, activation='relu')(grl)
             domain_output = Dense(1, activation="sigmoid", name="domain_classifier")(domain_classifier)
 
             # Combined model            
@@ -249,13 +247,16 @@ class DANN(PyRIIDModel):
         dual_validation_callback = DualValidationCallback(
             source_data=source_validation_data,
             target_data=target_validation_data,
-            batch_size=batch_size
+            loss = self.model.loss,
+            batch_size=batch_size,
         )
+        lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=grl_layer)
 
         if callbacks is None:
             callbacks = []
         callbacks.append(es)
         callbacks.append(dual_validation_callback)
+        callbacks.append(lambda_scheduler)
         
         history = self.model.fit(
             x=X_train,
@@ -322,51 +323,42 @@ class DANN(PyRIIDModel):
 
         ss.classified_by = self.model_id
 
-    def calc_APE_score(self, ss: SampleSet, target_level="Isotope"):
-        """Calculate the prediction APE score on ss"""
-        self.predict(ss)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        ape = APE_score(y_true, y_pred).numpy()
-        return ape
-
-    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope"):
-        """Calculate the prediction cosine similarity score on ss"""
-        self.predict(ss)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        cosine_sim = cosine_similarity(y_true, y_pred)
-        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
-        return cosine_score
-
-    def calc_loss(self, ss: SampleSet, target_level="Isotope"):
-        """Calculates the label predictor loss on ss"""
-        self.predict(ss)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        loss = self.model.loss["label_predictor"](y_true, y_pred).numpy()
-        return loss
-
 
 class GradientReversalLayer(Layer):
-    def __init__(self, hp_lambda=1.0, **kwargs):
+    def __init__(self, **kwargs):
         super(GradientReversalLayer, self).__init__(**kwargs)
-        self.hp_lambda = hp_lambda
+        self.lmbda = tf.Variable(0.0, trainable=False, dtype=tf.float32)
 
     def call(self, inputs):
         @tf.custom_gradient
         def _reverse_gradient(x):
             def grad(dy):
-                return -self.hp_lambda * dy
+                return -self.lmbda * dy
             return x, grad
         return _reverse_gradient(inputs)
 
 
+class LambdaScheduler(tf.keras.callbacks.Callback):
+    def __init__(self, gamma, total_epochs, grl_layer):
+        super().__init__()
+        self.gamma = gamma
+        self.total_epochs = total_epochs
+        self.grl_layer = grl_layer
+
+    def on_epoch_begin(self, epoch, logs=None):
+        p = epoch / self.total_epochs
+        new_lmbda = 2 / (1 + np.exp(-self.gamma * p)) - 1
+        tf.keras.backend.set_value(self.grl_layer.lmbda, new_lmbda)
+
+
 class DualValidationCallback(tf.keras.callbacks.Callback):
-    def __init__(self, source_data, target_data, batch_size=32):
+    """Calculates metrics (ape score, cosine similarity, loss, domain accuracy)
+    separately on the source and target domain"""
+    def __init__(self, source_data, target_data, loss, batch_size=64):
         super().__init__()
         self.source_data = source_data
         self.target_data = target_data
+        self.loss = loss
         self.batch_size = batch_size
 
     def on_epoch_end(self, epoch, logs=None):
@@ -376,26 +368,32 @@ class DualValidationCallback(tf.keras.callbacks.Callback):
         source_metrics = self.evaluate_domain(self.source_data)
         target_metrics = self.evaluate_domain(self.target_data)
 
-        logs['val_source_ape_score'] = source_metrics['ape_score'].numpy()
+        logs['val_source_ape_score'] = source_metrics['ape_score']
+        logs['val_source_cosine_similarity'] = source_metrics['cosine_similarity']
+        logs['val_source_loss'] = source_metrics['loss']
         logs['val_source_domain_accuracy'] = source_metrics['domain_accuracy']
-        logs['val_target_ape_score'] = target_metrics['ape_score'].numpy()
+        
+        logs['val_target_ape_score'] = target_metrics['ape_score']
+        logs['val_target_cosine_similarity'] = target_metrics['cosine_similarity']
+        logs['val_target_loss'] = target_metrics['loss']
         logs['val_target_domain_accuracy'] = target_metrics['domain_accuracy']
 
     def evaluate_domain(self, data):
         X_validation, predictor_labels, domain_labels = data
 
-        labels_dict = {
-            "label_predictor": predictor_labels,
-            "domain_classifier": domain_labels
-        }
-
         predictions = self.model.predict(X_validation, batch_size=self.batch_size, verbose=0)
         label_predictions = predictions["label_predictor"]
         domain_predictions = np.round(predictions["domain_classifier"])
-        ape_score = APE_score(predictor_labels, label_predictions)
+        
+        ape_score = APE_score(predictor_labels, label_predictions).numpy()
+        cosine_sim = cosine_similarity(predictor_labels, label_predictions)
+        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
+        loss = self.loss["label_predictor"](predictor_labels, label_predictions).numpy()
         domain_accuracy = accuracy_score(domain_labels, domain_predictions)
 
         return {
             "ape_score": ape_score,
-            "domain_accuracy": domain_accuracy
+            "cosine_similarity": cosine_score,
+            "loss": loss,
+            "domain_accuracy": domain_accuracy,
         }
