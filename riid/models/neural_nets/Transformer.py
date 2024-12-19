@@ -177,6 +177,7 @@ class Transformer(PyRIIDModel):
             verbose=verbose,
             validation_data=(X_validation, Y_validation),
             callbacks=callbacks,
+            shuffle=False,
          )
         self.history = history.history
 

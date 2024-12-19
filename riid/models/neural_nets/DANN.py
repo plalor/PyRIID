@@ -132,8 +132,30 @@ class DANN(PyRIIDModel):
         weights_domain_classifier_train = np.ones(len(X_train)).astype("float32")
 
         # Shuffle the training data
-        indices = np.arange(X_train.shape[0])
-        np.random.shuffle(indices)
+        num_source = len(X_source_train)
+        num_target = len(X_target_train)
+        if num_source == num_target:
+            print("Balanced source and target datasets, interweaving batches")
+            half_batch = batch_size // 2
+            source_indices = np.arange(num_source)
+            target_indices = np.arange(num_source, num_source + num_target)
+            np.random.shuffle(source_indices)
+            np.random.shuffle(target_indices)
+            num_batches = np.ceil((num_source + num_target) / batch_size).astype(int)
+            indices = []
+            for i in range(num_batches):
+                batch_source = source_indices[i*half_batch : (i+1)*half_batch]
+                batch_target = target_indices[i*half_batch : (i+1)*half_batch]
+                batch_indices = np.concatenate([batch_source, batch_target])
+                np.random.shuffle(batch_indices)
+                indices.append(batch_indices)
+            indices = np.concatenate(indices)
+        else:
+            print("WARNING: imbalanced source and target datasets")
+            indices = np.arange(X_train.shape[0])
+            np.random.shuffle(indices)
+
+        assert len(indices) == len(X_train)
         X_train = X_train[indices]
         predictor_labels_train = predictor_labels_train[indices]
         domain_labels_train = domain_labels_train[indices]
@@ -267,6 +289,7 @@ class DANN(PyRIIDModel):
             verbose=verbose,
             validation_data=(X_validation, labels_dict_validation, sample_weight_validation),
             callbacks=callbacks,
+            shuffle=False,
         )
         self.history = history.history
 

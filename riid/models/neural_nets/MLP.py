@@ -143,6 +143,7 @@ class MLP(PyRIIDModel):
             verbose=es_verbose,
             restore_best_weights=True,
             mode=es_mode,
+            shuffle=False,
         )
         if callbacks:
             callbacks.append(es)
