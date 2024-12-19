@@ -69,7 +69,7 @@ class DANN(PyRIIDModel):
 
     def fit(self, source_training_ss: SampleSet, target_training_ss: SampleSet, source_validation_ss: SampleSet, 
             target_validation_ss: SampleSet, batch_size: int = 200, epochs: int = 20, callbacks = None, 
-            patience: int = 10, es_monitor: str = "val_target_loss", es_mode: str = "min", es_verbose=0,
+            patience: int = 10, es_monitor: str = "val_target_ape_score", es_mode: str = "max", es_verbose=0,
             target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
