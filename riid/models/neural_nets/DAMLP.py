@@ -15,12 +15,12 @@ from riid.metrics import APE_score
 from sklearn.metrics import accuracy_score
 
 
-class DANN(PyRIIDModel):
-    """Domain Adversarial Neural Network classifier."""
+class DAMLP(PyRIIDModel):
+    """Domain Adversarial Multi-layer Perceptron classifier."""
     def __init__(self, activation=None, loss=None, optimizer=None,
                  metrics=None, l2_alpha: float = 1e-4,
                  activity_regularizer=None, final_activation=None,
-                 hidden_layers=None, dense_layer_size=None, grl_layer_size=0,
+                 hidden_layers=None, grl_layer_size = 0,
                  gamma=10, dropout=0):
         """
         Args:
@@ -31,8 +31,7 @@ class DANN(PyRIIDModel):
             l2_alpha: alpha value for the L2 regularization of each dense layer
             activity_regularizer: regularizer function applied each dense layer output
             final_activation: final activation function to apply to model output
-            hidden_layers: (filter, kernel_size) of each hidden laye of the CNN
-            dense_layer_size: size of the final dense layer after the convolutional layers
+            hidden_layers: hidden layer structure of the MLP
             grl_layer_size: size of the gradient reversal dense layer
             gamma: hyperparameter for adjusting domain adaptation parameter
             dropout: optional droupout layer after each hidden layer
@@ -48,7 +47,6 @@ class DANN(PyRIIDModel):
         self.final_activation = final_activation
 
         self.hidden_layers = hidden_layers
-        self.dense_layer_size = dense_layer_size
         self.grl_layer_size = grl_layer_size
         self.gamma = gamma
         self.dropout = dropout
@@ -208,32 +206,21 @@ class DANN(PyRIIDModel):
         
         if not self.model:
             input_shape = X_train.shape[1]
-            inputs = Input(shape=(input_shape,1), name="Spectrum")
+            inputs = Input(shape=(input_shape,), name="Spectrum")
             if self.hidden_layers is None:
-                self.hidden_layers = [(32, 5), (64, 3)]
-
-            # Feature extractor
+                self.hidden_layers = (input_shape//2,)
             x = inputs
-            for layer, (filters, kernel_size) in enumerate(self.hidden_layers):
-                x = Conv1D(
-                    filters=filters,
-                    kernel_size=kernel_size,
+            for layer, nodes in enumerate(self.hidden_layers):
+                x = Dense(
+                    nodes,
                     activation=self.activation,
                     activity_regularizer=self.activity_regularizer,
                     kernel_regularizer=l2(self.l2_alpha),
-                    name=f"conv_{layer}"
+                    name=f"dense_{layer}"
                 )(x)
-                x = MaxPooling1D(pool_size=2)(x)
-                
+
                 if self.dropout > 0:
                     x = Dropout(self.dropout)(x)
-
-            x = Flatten()(x)
-            if self.dense_layer_size is None:
-                self.dense_layer_size = input_shape//2
-            x = Dense(self.dense_layer_size, activation=self.activation)(x)
-            if self.dropout > 0:
-                x = Dropout(self.dropout)(x)
 
             # Label predictor
             label_outputs = Dense(predictor_labels_train.shape[1],
