@@ -126,11 +126,11 @@ class ADDA(PyRIIDModel):
         source_dataset_train = tf.data.Dataset.from_tensor_slices((X_source_train, Y_source_train))
         source_dataset_train = source_dataset_train.shuffle(buffer_size=len(X_source_train)).batch(batch_size)
         source_dataset_validation = tf.data.Dataset.from_tensor_slices((X_source_validation, Y_source_validation))
-        source_dataset_validation = source_dataset_validation.shuffle(buffer_size=len(X_source_validation)).batch(batch_size)
+        source_dataset_validation = source_dataset_validation.batch(batch_size)
         target_dataset_train = tf.data.Dataset.from_tensor_slices((X_target_train, Y_target_train))
         target_dataset_train = target_dataset_train.shuffle(buffer_size=len(X_target_train)).batch(batch_size)
         target_dataset_validation = tf.data.Dataset.from_tensor_slices((X_target_validation, Y_target_validation))
-        target_dataset_validation = target_dataset_validation.shuffle(buffer_size=len(X_target_validation)).batch(batch_size)
+        target_dataset_validation = target_dataset_validation.batch(batch_size)
                   
         ### Build discriminator
         if not self.discriminator:
@@ -141,6 +141,24 @@ class ADDA(PyRIIDModel):
                 x = Dense(self.dense_layer_size, activation=self.activation)(x)
             output = Dense(1, activation="sigmoid", name="discriminator")(x)
             self.discriminator = Model(inputs, output)
+
+        # Training loop
+        self.history = {'d_loss': [], 't_loss': [], 'train_ape_score': []}
+        for epoch in range(epochs):
+            if verbose:
+                print(f"Epoch {epoch+1}/{epochs}...", end="")
+                t0 = time()
+    
+            for (x_s, y_s), (x_t, y_t) in zip(source_dataset_train, target_dataset_train):
+                d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
+                t_loss = self.train_target_encoder_step(x_t)
+    
+            self.history['d_loss'].append(float(d_loss))
+            self.history['t_loss'].append(float(t_loss))
+
+            if verbose:
+                print(f"finished in {time()-t0:.0f} seconds")
+                print(f"  d_loss={d_loss:.4f}  t_loss={t_loss:.4f}")
 
         # Define ADDA model using target encoder and source classifier
         self.model = Model(
@@ -154,33 +172,7 @@ class ADDA(PyRIIDModel):
             normalization=source_training_ss.spectra_state,
         )
         self._set_predict_fn()
-
-        # Training loop
-        self.history = {'d_loss': [], 't_loss': [], 'train_ape_score': [], 'val_ape_score': []}
-        for epoch in range(epochs):
-            if verbose:
-                print(f"Epoch {epoch+1}/{epochs}...", end="")
-                t0 = time()
-    
-            for (x_s, y_s), (x_t, y_t) in zip(source_dataset_train, target_dataset_train):
-                d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
-                t_loss = self.train_target_encoder_step(x_t)
-    
-            self.history['d_loss'].append(float(d_loss))
-            self.history['t_loss'].append(float(t_loss))
-
-            train_ape_score = self.calc_APE_score(target_training_ss)
-            val_ape_score = self.calc_APE_score(target_validation_ss)
-            
-            self.history[f"train_ape_score"].append(train_ape_score)
-            self.history[f"val_ape_score"].append(val_ape_score)
-
-            if verbose:
-                print(f"finished in {time()-t0:.0f} seconds")
-                print(f"  d_loss={d_loss:.4f}  t_loss={t_loss:.4f}  "
-                      f"train_ape_score={train_ape_score:.4f}  "
-                      f"val_ape_score={val_ape_score:.4f}")
-                
+        
         return self.history
 
     def _set_predict_fn(self):
