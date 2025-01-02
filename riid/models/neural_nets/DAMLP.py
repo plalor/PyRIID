@@ -55,7 +55,7 @@ class DAMLP(PyRIIDModel):
             self.activation = "relu"
         if self.loss is None:
             self.loss = CategoricalCrossentropy()
-        if optimizer is None:
+        if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
         if self.activity_regularizer is None:
             self.activity_regularizer = l1(0.0)

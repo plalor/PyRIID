@@ -49,7 +49,7 @@ class LSTMClassifier(PyRIIDModel):
 
         if self.loss is None:
             self.loss = CategoricalCrossentropy()
-        if optimizer is None:
+        if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
         if self.metrics is None:
             self.metrics = [APE_score]
