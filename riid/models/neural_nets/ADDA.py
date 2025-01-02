@@ -12,6 +12,7 @@ from tensorflow.keras.regularizers import l1, l2
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
 from riid.metrics import APE_score
+from time import perf_counter as time
 
 
 class ADDA(PyRIIDModel):
@@ -158,7 +159,8 @@ class ADDA(PyRIIDModel):
         self.history = {'d_loss': [], 't_loss': [], 'train_ape_score': [], 'val_ape_score': []}
         for epoch in range(epochs):
             if verbose:
-                print(f"Epoch {epoch+1}/{epochs}")
+                print(f"Epoch {epoch+1}/{epochs}...", end="")
+                t0 = time()
     
             for (x_s, y_s), (x_t, y_t) in zip(source_dataset_train, target_dataset_train):
                 d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
@@ -174,6 +176,7 @@ class ADDA(PyRIIDModel):
             self.history[f"val_ape_score"].append(val_ape_score)
 
             if verbose:
+                print(f"finished in {time()-t0:.0f} seconds")
                 print(f"  d_loss={d_loss:.4f}  t_loss={t_loss:.4f}  "
                       f"train_ape_score={train_ape_score:.4f}  "
                       f"val_ape_score={val_ape_score:.4f}")
