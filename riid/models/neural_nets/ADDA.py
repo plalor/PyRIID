@@ -2,9 +2,8 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from keras.utils import Sequence
-from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten
-from tensorflow.keras.losses import BinaryCrossentropy, CategoricalCrossentropy, cosine_similarity
+from tensorflow.keras.losses import BinaryCrossentropy, cosine_similarity
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l1, l2
@@ -37,7 +36,6 @@ class ADDA(PyRIIDModel):
         self.metrics = metrics
         self.dense_layer_size = dense_layer_size
 
-        ### Define models
         all_layers = source_model.layers
         encoder_input = source_model.input
         encoder_output = all_layers[-2].output
@@ -49,9 +47,10 @@ class ADDA(PyRIIDModel):
         self.source_classifier = Model(inputs=classifier_input, outputs=classifier_output, name="source_classifier")
         
         self.target_encoder = clone_model(self.source_encoder)
+        self.target_encoder._name = "target_encoder"
         self.target_encoder.build(self.source_encoder.input_shape)
         self.target_encoder.set_weights(self.source_encoder.get_weights())
-
+            
         if self.activation is None:
             self.activation = "relu"
         if self.d_optimizer is None:
@@ -63,21 +62,20 @@ class ADDA(PyRIIDModel):
 
         self.discriminator = None
         self.model = None
-        self.loss = BinaryCrossentropy()
+        self.classification_loss = source_model.loss
+        self.discriminator_loss = BinaryCrossentropy()
 
-    def fit(self, source_training_ss: SampleSet, target_training_ss: SampleSet, source_validation_ss: SampleSet, 
-            target_validation_ss: SampleSet, batch_size: int = 200, epochs: int = 20, callbacks = None, 
+    def fit(self, source_ss: SampleSet, target_ss: SampleSet, batch_size: int = 200, epochs: int = 20,
             target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
-            training_ss: `SampleSet` of `n` training spectra where `n` >= 1 and the spectra 
-                are either foreground (AKA, "net") or gross.
-            validation_ss: `SampleSet` of `n` validation spectra where `n` >= 1 and the spectra 
-                are either foreground (AKA, "net") or gross.
+            source_ss: `SampleSet` of `n` training spectra from the source domain where `n` >= 1
+                and the spectra are either foreground (AKA, "net") or gross.
+            target_ss: `SampleSet` of `n` training spectra from the target domain where `n` >= 1
+                and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
-            callbacks: list of callbacks to be passed to the TensorFlow `Model.fit()` method
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
 
@@ -88,49 +86,37 @@ class ADDA(PyRIIDModel):
             `ValueError` when no spectra are provided as input
         """
 
-        if source_training_ss.n_samples <= 0:
+        if source_ss.n_samples <= 0:
             raise ValueError("No spectr[a|um] provided!")
 
-        if source_training_ss.spectra_type == SpectraType.Gross:
+        if source_ss.spectra_type == SpectraType.Gross:
             self.model_inputs = (ModelInput.GrossSpectrum,)
-        elif source_training_ss.spectra_type == SpectraType.Foreground:
+        elif source_ss.spectra_type == SpectraType.Foreground:
             self.model_inputs = (ModelInput.ForegroundSpectrum,)
-        elif source_training_ss.spectra_type == SpectraType.Background:
+        elif source_ss.spectra_type == SpectraType.Background:
             self.model_inputs = (ModelInput.BackgroundSpectrum,)
         else:
-            raise ValueError(f"{source_training_ss.spectra_type} is not supported in this model.")
+            raise ValueError(f"{source_ss.spectra_type} is not supported in this model.")
 
         ### Preparing training data
-        X_source_train = source_training_ss.get_samples()
-        X_target_train = target_training_ss.get_samples()
-        X_source_validation = source_validation_ss.get_samples()
-        X_target_validation = target_validation_ss.get_samples()
+        X_source = source_ss.get_samples()
+        X_target = target_ss.get_samples()
 
         # Domain labels: 0 for source, 1 for target
-        Y_source_train = np.zeros(len(X_source_train)).reshape(-1, 1)
-        Y_target_train = np.ones(len(X_target_train)).reshape(-1, 1)
-        Y_source_validation = np.zeros(len(X_source_validation)).reshape(-1, 1)
-        Y_target_validation = np.ones(len(X_target_validation)).reshape(-1, 1)
+        Y_source = np.zeros(len(X_source)).reshape(-1, 1)
+        Y_target = np.ones(len(X_target)).reshape(-1, 1)
 
         # Convert to tensors
-        X_source_train = tf.convert_to_tensor(X_source_train, dtype=tf.float32)
-        X_target_train = tf.convert_to_tensor(X_target_train, dtype=tf.float32)
-        X_source_validation = tf.convert_to_tensor(X_source_validation, dtype=tf.float32)
-        X_target_validation = tf.convert_to_tensor(X_target_validation, dtype=tf.float32)
-        Y_source_train = tf.convert_to_tensor(Y_source_train, dtype=tf.float32)
-        Y_target_train = tf.convert_to_tensor(Y_target_train, dtype=tf.float32)
-        Y_source_validation = tf.convert_to_tensor(Y_source_validation, dtype=tf.float32)
-        Y_target_validation = tf.convert_to_tensor(Y_target_validation, dtype=tf.float32)
+        X_source = tf.convert_to_tensor(X_source, dtype=tf.float32)
+        X_target = tf.convert_to_tensor(X_target, dtype=tf.float32)
+        Y_source = tf.convert_to_tensor(Y_source, dtype=tf.float32)
+        Y_target = tf.convert_to_tensor(Y_target, dtype=tf.float32)
 
         # Make datasets
-        source_dataset_train = tf.data.Dataset.from_tensor_slices((X_source_train, Y_source_train))
-        source_dataset_train = source_dataset_train.shuffle(buffer_size=len(X_source_train)).batch(batch_size)
-        source_dataset_validation = tf.data.Dataset.from_tensor_slices((X_source_validation, Y_source_validation))
-        source_dataset_validation = source_dataset_validation.batch(batch_size)
-        target_dataset_train = tf.data.Dataset.from_tensor_slices((X_target_train, Y_target_train))
-        target_dataset_train = target_dataset_train.shuffle(buffer_size=len(X_target_train)).batch(batch_size)
-        target_dataset_validation = tf.data.Dataset.from_tensor_slices((X_target_validation, Y_target_validation))
-        target_dataset_validation = target_dataset_validation.batch(batch_size)
+        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
+        source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
+        target_dataset = tf.data.Dataset.from_tensor_slices((X_target, Y_target))
+        target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
                   
         ### Build discriminator
         if not self.discriminator:
@@ -143,13 +129,13 @@ class ADDA(PyRIIDModel):
             self.discriminator = Model(inputs, output)
 
         # Training loop
-        self.history = {'d_loss': [], 't_loss': [], 'train_ape_score': []}
+        self.history = {'d_loss': [], 't_loss': []}
         for epoch in range(epochs):
             if verbose:
                 print(f"Epoch {epoch+1}/{epochs}...", end="")
                 t0 = time()
     
-            for (x_s, y_s), (x_t, y_t) in zip(source_dataset_train, target_dataset_train):
+            for (x_s, y_s), (x_t, y_t) in zip(source_dataset, target_dataset):
                 d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
                 t_loss = self.train_target_encoder_step(x_t)
     
@@ -165,11 +151,11 @@ class ADDA(PyRIIDModel):
             inputs=self.target_encoder.input,
             outputs=self.source_classifier(self.target_encoder.output)
         )
-        self.model.compile(loss = CategoricalCrossentropy())
+        self.model.compile(loss = self.classification_loss)
         self._update_info(
             target_level=target_level,
-            model_outputs = source_training_ss.sources.T.groupby(target_level, sort=False).sum().T.columns.values.tolist(),
-            normalization=source_training_ss.spectra_state,
+            model_outputs = source_ss.sources.T.groupby(target_level, sort=False).sum().T.columns.values.tolist(),
+            normalization=source_ss.spectra_state,
         )
         self._set_predict_fn()
         
@@ -256,8 +242,8 @@ class ADDA(PyRIIDModel):
             pred_s = self.discriminator(f_s, training=True)
             pred_t = self.discriminator(f_t, training=True)
     
-            loss_s = self.loss(y_s, pred_s)
-            loss_t = self.loss(y_t, pred_t)
+            loss_s = self.discriminator_loss(y_s, pred_s)
+            loss_t = self.discriminator_loss(y_t, pred_t)
             d_loss = (loss_s + loss_t) / 2.0
     
         grads = tape.gradient(d_loss, self.discriminator.trainable_variables)
@@ -279,7 +265,7 @@ class ADDA(PyRIIDModel):
             f_t = self.target_encoder(x_t, training=True)
             pred_t = self.discriminator(f_t, training=False)
             target_labels = tf.zeros_like(pred_t)
-            t_loss = self.loss(target_labels, pred_t)
+            t_loss = self.discriminator_loss(target_labels, pred_t)
     
         grads = tape.gradient(t_loss, self.target_encoder.trainable_variables)
         self.t_optimizer.apply_gradients(zip(grads, self.target_encoder.trainable_variables))
