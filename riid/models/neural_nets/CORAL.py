@@ -86,11 +86,6 @@ class CORAL(PyRIIDModel):
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
 
-        # Convert to tensors
-        X_source = tf.convert_to_tensor(X_source, dtype=tf.float32)
-        X_target = tf.convert_to_tensor(X_target, dtype=tf.float32)
-        Y_source = tf.convert_to_tensor(Y_source, dtype=tf.float32)
-
         # Make datasets
         source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
         source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
@@ -223,4 +218,3 @@ class CORAL(PyRIIDModel):
         cov_target = tf.matmul(tf.transpose(t_centered), t_centered)
 
         return tf.reduce_mean(tf.square(cov_source - cov_target))
-

@@ -64,7 +64,6 @@ class ADDA(PyRIIDModel):
 
         self.discriminator = None
         self.model = None
-        self._set_predict_fn()
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, batch_size: int = 200, epochs: int = 20,
             target_level="Isotope", verbose: bool = False):
@@ -106,12 +105,6 @@ class ADDA(PyRIIDModel):
         # Domain labels: 0 for source, 1 for target
         Y_source = np.zeros(len(X_source)).reshape(-1, 1)
         Y_target = np.ones(len(X_target)).reshape(-1, 1)
-
-        # Convert to tensors
-        X_source = tf.convert_to_tensor(X_source, dtype=tf.float32)
-        X_target = tf.convert_to_tensor(X_target, dtype=tf.float32)
-        Y_source = tf.convert_to_tensor(Y_source, dtype=tf.float32)
-        Y_target = tf.convert_to_tensor(Y_target, dtype=tf.float32)
 
         # Make datasets
         source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
@@ -158,18 +151,8 @@ class ADDA(PyRIIDModel):
             model_outputs = source_ss.sources.T.groupby(target_level, sort=False).sum().T.columns.values.tolist(),
             normalization=source_ss.spectra_state,
         )
-        self._set_predict_fn()
         
         return self.history
-
-    def _set_predict_fn(self):
-        self._predict_fn = tf.function(
-            self._predict,
-            experimental_relax_shapes=True
-        )
-
-    def _predict(self, input_tensor):
-        return self.model(input_tensor, training=False)
 
     def predict(self, ss: SampleSet, bg_ss: SampleSet = None):
         """Classify the spectra in the provided `SampleSet`(s).
@@ -187,8 +170,7 @@ class ADDA(PyRIIDModel):
         else:
             X = x_test
 
-        spectra_tensor = tf.convert_to_tensor(X, dtype=tf.float32)
-        results = self._predict_fn(spectra_tensor)
+        results = self.model.predict(X, batch_size=64)
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]
