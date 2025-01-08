@@ -35,23 +35,25 @@ class ADDA(PyRIIDModel):
         self.t_optimizer = t_optimizer
         self.metrics = metrics
         self.dense_layer_size = dense_layer_size
-        self.classification_loss = source_model.loss
         self.discriminator_loss = BinaryCrossentropy()
 
-        all_layers = source_model.layers
-        encoder_input = source_model.input
-        encoder_output = all_layers[-2].output
-        self.source_encoder = Model(inputs=encoder_input, outputs=encoder_output, name="source_encoder")
-        self.source_encoder.trainable = False
-        
-        classifier_input = Input(shape=encoder_output.shape[1:], name="encoder_output")
-        classifier_output = all_layers[-1](classifier_input)
-        self.source_classifier = Model(inputs=classifier_input, outputs=classifier_output, name="source_classifier")
-        
-        self.target_encoder = clone_model(self.source_encoder)
-        self.target_encoder._name = "target_encoder"
-        self.target_encoder.build(self.source_encoder.input_shape)
-        self.target_encoder.set_weights(self.source_encoder.get_weights())
+        if source_model is not None:
+            self.classification_loss = source_model.loss
+
+            all_layers = source_model.layers
+            encoder_input = source_model.input
+            encoder_output = all_layers[-2].output
+            self.source_encoder = Model(inputs=encoder_input, outputs=encoder_output, name="source_encoder")
+            self.source_encoder.trainable = False
+
+            classifier_input = Input(shape=encoder_output.shape[1:], name="encoder_output")
+            classifier_output = all_layers[-1](classifier_input)
+            self.source_classifier = Model(inputs=classifier_input, outputs=classifier_output, name="source_classifier")
+
+            self.target_encoder = clone_model(self.source_encoder)
+            self.target_encoder._name = "target_encoder"
+            self.target_encoder.build(self.source_encoder.input_shape)
+            self.target_encoder.set_weights(self.source_encoder.get_weights())
             
         if self.activation is None:
             self.activation = "relu"
@@ -170,7 +172,7 @@ class ADDA(PyRIIDModel):
         else:
             X = x_test
 
-        results = self.model.predict(X, batch_size=64)
+        results = self.model.predict(X, batch_size=1000)
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]

@@ -61,7 +61,7 @@ class LSTMClassifier(PyRIIDModel):
         self.model = None
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size: int = 200,
-            epochs: int = 20, callbacks = None, patience: int = 10, es_monitor: str = "val_ape_score",
+            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_ape_score",
             es_mode: str = "max", es_verbose=0, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
@@ -103,15 +103,14 @@ class LSTMClassifier(PyRIIDModel):
         source_contributions_df_train = training_ss.sources.T.groupby(target_level, sort=False).sum().T
         model_outputs = source_contributions_df_train.columns.values.tolist()
         Y_train = source_contributions_df_train.values.astype("float32")
-
-        # Shuffle the training data
-        indices = np.arange(X_train.shape[0])
-        np.random.shuffle(indices)
-        X_train = X_train[indices]
-        Y_train = Y_train[indices]
         
         X_validation = validation_ss.get_samples().astype("float32")
         Y_validation = validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+
+        training_dataset = tf.data.Dataset.from_tensor_slices((X_train, Y_train))
+        training_dataset = training_dataset.shuffle(len(X_train)).batch(batch_size)
+        validation_dataset = tf.data.Dataset.from_tensor_slices((X_validation, Y_validation))
+        validation_dataset = validation_dataset.batch(batch_size)
 
         if not self.model:
             input_shape = X_train.shape[1]
@@ -166,14 +165,12 @@ class LSTMClassifier(PyRIIDModel):
             callbacks = [es]
 
         history = self.model.fit(
-            x=X_train,
-            y=Y_train,
+            training_dataset,
             batch_size=batch_size,
             epochs=epochs,
             verbose=verbose,
-            validation_data=(X_validation, Y_validation),
+            validation_data=validation_dataset,
             callbacks=callbacks,
-            shuffle=False,
          )
         self.history = history.history
 
@@ -202,7 +199,7 @@ class LSTMClassifier(PyRIIDModel):
         else:
             X = x_test
 
-        results = self.model.predict(X, batch_size=64)
+        results = self.model.predict(X, batch_size=1000)
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]

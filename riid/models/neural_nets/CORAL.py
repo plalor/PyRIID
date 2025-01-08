@@ -25,20 +25,22 @@ class CORAL(PyRIIDModel):
         """
         super().__init__()
 
-        self.classification_loss = source_model.loss
-        self.source_model = clone_model(source_model)
-        self.source_model.set_weights(source_model.get_weights())        
         self.optimizer = optimizer
         self.lmbda = lmbda
-        
-        all_layers = self.source_model.layers
-        feature_extractor_input = self.source_model.input
-        feature_extractor_output = all_layers[-2].output
-        self.feature_extractor = Model(inputs=feature_extractor_input, outputs=feature_extractor_output, name="feature_extractor")
-        
-        source_classifier_input = Input(shape=feature_extractor_output.shape[1:], name="feature_extractor_output")
-        source_classifier_output = all_layers[-1](source_classifier_input)
-        self.source_classifier = Model(inputs=source_classifier_input, outputs=source_classifier_output, name="source_classifier")
+
+        if source_model is not None:
+            self.classification_loss = source_model.loss
+            self.source_model = clone_model(source_model)
+            self.source_model.set_weights(source_model.get_weights())
+
+            all_layers = self.source_model.layers
+            feature_extractor_input = self.source_model.input
+            feature_extractor_output = all_layers[-2].output
+            self.feature_extractor = Model(inputs=feature_extractor_input, outputs=feature_extractor_output, name="feature_extractor")
+
+            source_classifier_input = Input(shape=feature_extractor_output.shape[1:], name="feature_extractor_output")
+            source_classifier_output = all_layers[-1](source_classifier_input)
+            self.source_classifier = Model(inputs=source_classifier_input, outputs=source_classifier_output, name="source_classifier")
 
         if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
@@ -164,7 +166,7 @@ class CORAL(PyRIIDModel):
         else:
             X = x_test
 
-        results = self.model.predict(X, batch_size=64)
+        results = self.model.predict(X, batch_size=1000)
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]
