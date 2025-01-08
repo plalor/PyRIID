@@ -35,6 +35,8 @@ class ADDA(PyRIIDModel):
         self.t_optimizer = t_optimizer
         self.metrics = metrics
         self.dense_layer_size = dense_layer_size
+        self.classification_loss = source_model.loss
+        self.discriminator_loss = BinaryCrossentropy()
 
         all_layers = source_model.layers
         encoder_input = source_model.input
@@ -62,8 +64,7 @@ class ADDA(PyRIIDModel):
 
         self.discriminator = None
         self.model = None
-        self.classification_loss = source_model.loss
-        self.discriminator_loss = BinaryCrossentropy()
+        self._set_predict_fn()
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, batch_size: int = 200, epochs: int = 20,
             target_level="Isotope", verbose: bool = False):

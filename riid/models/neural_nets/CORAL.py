@@ -4,7 +4,7 @@ import tensorflow as tf
 from keras.utils import Sequence
 from tensorflow.keras.layers import Input
 from tensorflow.keras.losses import CategoricalCrossentropy, cosine_similarity
-from tensorflow.keras.models import Model
+from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l1, l2
 
@@ -25,7 +25,9 @@ class CORAL(PyRIIDModel):
         """
         super().__init__()
 
-        self.source_model = source_model
+        self.classification_loss = source_model.loss
+        self.source_model = clone_model(source_model)
+        self.source_model.set_weights(source_model.get_weights())        
         self.optimizer = optimizer
         self.lmbda = lmbda
         
@@ -42,8 +44,6 @@ class CORAL(PyRIIDModel):
             self.optimizer = Adam(learning_rate=0.001)
 
         self.model = None
-        self.classification_loss = self.source_model.loss
-        self._set_predict_fn()
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, batch_size: int = 200,
             epochs: int = 20, target_level="Isotope", verbose: bool = False):
@@ -151,19 +151,7 @@ class CORAL(PyRIIDModel):
             normalization=source_ss.spectra_state,
         )
 
-        # Define the predict function with tf.function and input_signature
-        self._set_predict_fn()
-
         return self.history
-
-    def _set_predict_fn(self):
-        self._predict_fn = tf.function(
-            self._predict,
-            experimental_relax_shapes=True
-        )
-
-    def _predict(self, input_tensor):
-        return self.model(input_tensor, training=False)
 
     def predict(self, ss: SampleSet, bg_ss: SampleSet = None):
         """Classify the spectra in the provided `SampleSet`(s).
@@ -181,8 +169,7 @@ class CORAL(PyRIIDModel):
         else:
             X = x_test
 
-        spectra_tensor = tf.convert_to_tensor(X, dtype=tf.float32)
-        results = self._predict_fn(spectra_tensor)
+        results = self.model.predict(X, batch_size=64)
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]
