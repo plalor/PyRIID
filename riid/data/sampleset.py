@@ -1471,6 +1471,13 @@ class SampleSet():
                 transformation.T))
 
 
+def concat_ss(ss_list: list):
+    """Concatenates a list of SampleSets into one SampleSet"""
+    ss = ss_list[0][:]
+    ss.concat(ss_list[1:])
+    return ss
+
+
 def read_hdf(path: str, row_slice: tuple[int, int] = None) -> SampleSet:
     """Read an HDF file in as a `SampleSet` object.
 

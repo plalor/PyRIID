@@ -10,7 +10,7 @@ import sys
 from importlib.metadata import version
 
 from riid.data.sampleset import (SampleSet, SpectraState, SpectraType,
-                                 read_hdf, read_json, read_pcf)
+                                 read_hdf, read_json, read_pcf, concat_ss)
 from riid.data.synthetic.passby import PassbySynthesizer
 from riid.data.synthetic.seed import (SeedMixer, SeedSynthesizer,
                                       get_dummy_seeds)
