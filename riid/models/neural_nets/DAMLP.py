@@ -64,10 +64,8 @@ class DAMLP(PyRIIDModel):
 
         self.model = None
 
-    def fit(self, source_training_ss: SampleSet, target_training_ss: SampleSet, source_validation_ss: SampleSet, 
-            target_validation_ss: SampleSet, batch_size: int = 200, epochs: int = 20, callbacks = None, 
-            patience: int = 10**4, es_monitor: str = "val_target_ape_score", es_mode: str = "max", es_verbose=0,
-            target_level="Isotope", verbose: bool = False):
+    def fit(self, source_training_ss: SampleSet, target_training_ss: SampleSet, batch_size: int = 200, 
+            epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -75,15 +73,8 @@ class DAMLP(PyRIIDModel):
                 and the spectra are either foreground (AKA, "net") or gross.
             target_training_ss: `SampleSet` of `m` training spectra from the target domain where `m` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
-            source_validation_ss: `SampleSet` of source domain validation spectra.
-            target_validation_ss: `SampleSet` of target domain validation spectra.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
-            callbacks: list of callbacks to be passed to the TensorFlow `Model.fit()` method
-            patience: number of epochs to wait for `EarlyStopping` object
-            es_monitor: quantity to be monitored for `EarlyStopping` object
-            es_mode: mode for `EarlyStopping` object
-            es_verbose: verbosity level for `EarlyStopping` object
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
 
@@ -169,40 +160,6 @@ class DAMLP(PyRIIDModel):
             "domain_classifier": weights_domain_classifier_train
         }
 
-        ### Preparing validation data
-        X_source_validation = source_validation_ss.get_samples()
-        X_target_validation = target_validation_ss.get_samples()
-        X_validation = np.concatenate((X_source_validation, X_target_validation)).astype("float32")
-        
-        # Label predictor labels
-        predictor_labels_source_validation = source_validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        predictor_labels_target_validation = target_validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        predictor_labels_validation = np.concatenate((predictor_labels_source_validation, predictor_labels_target_validation)).astype("float32")
-        
-        # Domain labels: 0 for source, 1 for target
-        domain_labels_source_validation = np.zeros(len(X_source_validation)).reshape(-1, 1)
-        domain_labels_target_validation = np.ones(len(X_target_validation)).reshape(-1, 1)
-        domain_labels_validation = np.concatenate((domain_labels_source_validation, domain_labels_target_validation)).astype("float32")
-
-        # Weights for label predictor (1 for source, 0 for target) and domain classifier (1 for all samples)
-        weights_label_predictor_validation = np.concatenate((np.ones(len(X_source_validation)), np.zeros(len(X_target_validation)))).astype("float32")
-        weights_domain_classifier_validation = np.ones(len(X_validation)).astype("float32")
-
-        # Prepare label and weight dictionaries
-        labels_dict_validation = {
-            "label_predictor": predictor_labels_validation,
-            "domain_classifier": domain_labels_validation
-        }
-        sample_weight_validation = {
-            "label_predictor": weights_label_predictor_validation,
-            "domain_classifier": weights_domain_classifier_validation
-        }
-
-        # Prepare validation data for callbacks
-        source_validation_data = (X_source_validation, predictor_labels_source_validation, domain_labels_source_validation)
-        target_validation_data = (X_target_validation, predictor_labels_target_validation, domain_labels_target_validation)
-        ###
-        
         if not self.model:
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
@@ -244,26 +201,7 @@ class DAMLP(PyRIIDModel):
                 metrics=self.metrics
             )
 
-        es = EarlyStopping(
-            monitor=es_monitor,
-            patience=patience,
-            verbose=es_verbose,
-            restore_best_weights=True,
-            mode=es_mode,
-        )
-        dual_validation_callback = DualValidationCallback(
-            source_data=source_validation_data,
-            target_data=target_validation_data,
-            loss = self.model.loss,
-            batch_size=batch_size,
-        )
         lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=grl_layer)
-
-        if callbacks is None:
-            callbacks = []
-        callbacks.append(dual_validation_callback)
-        callbacks.append(lambda_scheduler)
-        callbacks.append(es)
         
         history = self.model.fit(
             x=X_train,
@@ -272,8 +210,7 @@ class DAMLP(PyRIIDModel):
             batch_size=batch_size,
             epochs=epochs,
             verbose=verbose,
-            validation_data=(X_validation, labels_dict_validation, sample_weight_validation),
-            callbacks=callbacks,
+            callbacks=(lambda_scheduler),
             shuffle=False,
         )
         self.history = history.history
@@ -303,7 +240,7 @@ class DAMLP(PyRIIDModel):
         else:
             X = x_test
 
-        results = self.model.predict(X, batch_size=1000)
+        results = self.model.predict(X, batch_size=1000)["label_predictor"]
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]
@@ -342,6 +279,15 @@ class DAMLP(PyRIIDModel):
         loss = self.model.loss["label_predictor"](y_true, y_pred).numpy()
         return loss
 
+    def calc_domain_accuracy(self, ss: SampleSet, domain_label: int):
+        """Calculate the domain classification accuracy on ss"""
+        x_test = ss.get_samples().astype(float)
+        preds = self.model.predict(x_test, batch_size=1000)
+        domain_preds = np.round(preds["domain_classifier"]).astype(int).flatten()
+        domain_labels = np.full(shape=(len(x_test),), fill_value=domain_label, dtype=int)
+        accuracy = accuracy_score(domain_labels, domain_preds)
+        return accuracy
+
 
 class GradientReversalLayer(Layer):
     def __init__(self, **kwargs):
@@ -368,51 +314,3 @@ class LambdaScheduler(tf.keras.callbacks.Callback):
         p = epoch / self.total_epochs
         new_lmbda = 2 / (1 + np.exp(-self.gamma * p)) - 1
         tf.keras.backend.set_value(self.grl_layer.lmbda, new_lmbda)
-
-
-class DualValidationCallback(tf.keras.callbacks.Callback):
-    """Calculates metrics (ape score, cosine similarity, loss, domain accuracy)
-    separately on the source and target domain"""
-    def __init__(self, source_data, target_data, loss, batch_size=64):
-        super().__init__()
-        self.source_data = source_data
-        self.target_data = target_data
-        self.loss = loss
-        self.batch_size = batch_size
-
-    def on_epoch_end(self, epoch, logs=None):
-        if logs is None:
-            logs = {}
-            
-        source_metrics = self.evaluate_domain(self.source_data)
-        target_metrics = self.evaluate_domain(self.target_data)
-
-        logs['val_source_ape_score'] = source_metrics['ape_score']
-        logs['val_source_cosine_similarity'] = source_metrics['cosine_similarity']
-        logs['val_source_loss'] = source_metrics['loss']
-        logs['val_source_domain_accuracy'] = source_metrics['domain_accuracy']
-        
-        logs['val_target_ape_score'] = target_metrics['ape_score']
-        logs['val_target_cosine_similarity'] = target_metrics['cosine_similarity']
-        logs['val_target_loss'] = target_metrics['loss']
-        logs['val_target_domain_accuracy'] = target_metrics['domain_accuracy']
-
-    def evaluate_domain(self, data):
-        X_validation, predictor_labels, domain_labels = data
-
-        predictions = self.model.predict(X_validation, batch_size=self.batch_size, verbose=0)
-        label_predictions = predictions["label_predictor"]
-        domain_predictions = np.round(predictions["domain_classifier"])
-        
-        ape_score = APE_score(predictor_labels, label_predictions).numpy()
-        cosine_sim = cosine_similarity(predictor_labels, label_predictions)
-        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
-        loss = self.loss["label_predictor"](predictor_labels, label_predictions).numpy()
-        domain_accuracy = accuracy_score(domain_labels, domain_predictions)
-
-        return {
-            "ape_score": ape_score,
-            "cosine_similarity": cosine_score,
-            "loss": loss,
-            "domain_accuracy": domain_accuracy,
-        }

@@ -804,18 +804,31 @@ class SampleSet():
         )
         self._spectra[self._spectra < min_frac] = 0
 
-    def set_max_energy(self, E_max: int = 1500):
-        """Removes all bins above the max energy"""
+    def set_max_energy(self, max_E: int = 1500):
+        """Removes all bins above `max_E` """
         if (self.info["ecal_low_e"] != 0).any():
             raise NotImplementedError("Can't rebin if ecal_low_e != 0")
 
-        mask = self.get_channel_energies(0) <= E_max
+        old_max_E = self.get_channel_energies(0)[-1]
+        mask = self.get_channel_energies(0) <= max_E
         self.spectra = self.spectra.iloc[:,mask]
 
-        old_E_max = self.get_channel_energies(0)[-1]
-        self.info["ecal_order_1"] = self.info["ecal_order_1"] * (E_max / old_E_max)
-        self.info["ecal_order_2"] = self.info["ecal_order_2"] * (E_max / old_E_max)**2
-        self.info["ecal_order_3"] = self.info["ecal_order_3"] * (E_max / old_E_max)**3
+        self.info["ecal_order_1"] = self.info["ecal_order_1"] * (max_E / old_max_E)
+        self.info["ecal_order_2"] = self.info["ecal_order_2"] * (max_E / old_max_E)**2
+        self.info["ecal_order_3"] = self.info["ecal_order_3"] * (max_E / old_max_E)**3
+
+    def set_max_bin(self, max_bin: int = 512):
+        """Keeps only the first `max_bin` bins"""
+        if (self.info["ecal_low_e"] != 0).any():
+            raise NotImplementedError("Can't rebin if ecal_low_e != 0")
+
+        new_max_E = self.get_channel_energies(0)[max_bin-1]
+        old_max_E = self.get_channel_energies(0)[-1]
+        self.spectra = self.spectra.iloc[:,:max_bin]
+
+        self.info["ecal_order_1"] = self.info["ecal_order_1"] * (new_max_E / old_max_E)
+        self.info["ecal_order_2"] = self.info["ecal_order_2"] * (new_max_E / old_max_E)**2
+        self.info["ecal_order_3"] = self.info["ecal_order_3"] * (new_max_E / old_max_E)**3
 
     def drop_sources(self, col_names: Iterable = DEFAULT_BG_SEED_NAMES,
                      normalize_sources: bool = True,
