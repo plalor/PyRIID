@@ -13,6 +13,7 @@ from tensorflow.keras.regularizers import l1, l2
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
 from riid.metrics import APE_score
+from time import perf_counter as time
 
 
 class Transformer(PyRIIDModel):
@@ -166,6 +167,7 @@ class Transformer(PyRIIDModel):
         else:
             callbacks = [es]
 
+        t0 = time()
         history = self.model.fit(
             training_dataset,
             batch_size=batch_size,
@@ -175,6 +177,7 @@ class Transformer(PyRIIDModel):
             callbacks=callbacks,
          )
         self.history = history.history
+        self.history["training_time"] = time() - t0
 
         # Update model information
         self._update_info(

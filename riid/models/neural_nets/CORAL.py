@@ -94,11 +94,12 @@ class CORAL(PyRIIDModel):
         target_dataset = tf.data.Dataset.from_tensor_slices((X_target))
         target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
 
-        self.history = {'class_loss': [], 'total_loss': [], 'coral_loss': []}
+        self.history = {"class_loss": [], "total_loss": [], "coral_loss": []}
+        t0 = time()
         for epoch in range(epochs):
             if verbose:
                 print(f"Epoch {epoch+1}/{epochs}...", end="")
-                t0 = time()
+                t1 = time()
             total_loss_avg = tf.metrics.Mean()
             class_loss_avg = tf.metrics.Mean()
             coral_loss_avg = tf.metrics.Mean()
@@ -122,17 +123,18 @@ class CORAL(PyRIIDModel):
                 class_loss_avg.update_state(class_loss)
                 coral_loss_avg.update_state(coral_val)
 
-            self.history['class_loss'].append(float(total_loss_avg.result()))
-            self.history['total_loss'].append(float(class_loss_avg.result()))
-            self.history['coral_loss'].append(float(coral_loss_avg.result()))
+            self.history["class_loss"].append(float(total_loss_avg.result()))
+            self.history["total_loss"].append(float(class_loss_avg.result()))
+            self.history["coral_loss"].append(float(coral_loss_avg.result()))
 
             if verbose:
-                print(f"finished in {time()-t0:.0f} seconds")
+                print(f"finished in {time()-t1:.0f} seconds")
                 print("  "
                     f"total_loss={total_loss_avg.result():.4f}  "
                     f"class_loss={class_loss_avg.result():.4f}  "
                     f"coral_loss={coral_loss_avg.result():.4f}"
                 )
+        self.history["training_time"] = time() - t0
 
         # Define CORAL model
         self.model = Model(

@@ -125,23 +125,25 @@ class ADDA(PyRIIDModel):
             self.discriminator = Model(inputs, output)
 
         # Training loop
-        self.history = {'d_loss': [], 't_loss': []}
+        self.history = {"d_loss": [], "t_loss": []}
+        t0 = time()
         for epoch in range(epochs):
             if verbose:
                 print(f"Epoch {epoch+1}/{epochs}...", end="")
-                t0 = time()
+                t1 = time()
     
             for (x_s, y_s), (x_t, y_t) in zip(source_dataset, target_dataset):
                 d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
                 t_loss = self.train_target_encoder_step(x_t)
     
-            self.history['d_loss'].append(float(d_loss))
-            self.history['t_loss'].append(float(t_loss))
+            self.history["d_loss"].append(float(d_loss))
+            self.history["t_loss"].append(float(t_loss))
 
             if verbose:
-                print(f"finished in {time()-t0:.0f} seconds")
+                print(f"finished in {time()-t1:.0f} seconds")
                 print(f"  d_loss={d_loss:.4f}  t_loss={t_loss:.4f}")
-
+        self.history["training_time"] = time() - t0
+        
         # Define ADDA model using target encoder and source classifier
         self.model = Model(
             inputs=self.target_encoder.input,

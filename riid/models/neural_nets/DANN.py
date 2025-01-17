@@ -13,6 +13,7 @@ from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
 from riid.metrics import APE_score
 from sklearn.metrics import accuracy_score
+from time import perf_counter as time
 
 
 class DANN(PyRIIDModel):
@@ -215,7 +216,8 @@ class DANN(PyRIIDModel):
             )
 
         lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=grl_layer)
-        
+
+        t0 = time()
         history = self.model.fit(
             x=X_train,
             y=labels_dict_train,
@@ -227,6 +229,7 @@ class DANN(PyRIIDModel):
             shuffle=False,
         )
         self.history = history.history
+        self.history["training_time"] = time() - t0
 
         # Update model information
         self._update_info(
