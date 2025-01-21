@@ -9,7 +9,6 @@ from riid.models.neural_nets.CNN import CNN
 from riid.models.neural_nets.Transformer import Transformer
 from riid.models.neural_nets.LSTM import LSTMClassifier
 from riid.models.neural_nets.DANN import DANN
-from riid.models.neural_nets.DAMLP import DAMLP
 from riid.models.neural_nets.ADDA import ADDA
 from riid.models.neural_nets.CORAL import CORAL
 

@@ -1,12 +1,10 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from keras.utils import Sequence
 from tensorflow.keras.layers import Input
 from tensorflow.keras.losses import CategoricalCrossentropy, cosine_similarity
-from tensorflow.keras.models import Model, clone_model
+from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l1, l2
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
@@ -30,7 +28,12 @@ class CORAL(PyRIIDModel):
 
         if source_model is not None:
             self.classification_loss = source_model.loss
-            self.source_model = clone_model(source_model)
+
+            # Remove dropout layers for stability
+            config = source_model.get_config()
+            filtered_layers = [layer for layer in config["layers"] if layer["class_name"] != "Dropout"]
+            config["layers"] = filtered_layers
+            self.source_model = Model.from_config(config)
             self.source_model.set_weights(source_model.get_weights())
 
             all_layers = self.source_model.layers
@@ -38,9 +41,9 @@ class CORAL(PyRIIDModel):
             feature_extractor_output = all_layers[-2].output
             self.feature_extractor = Model(inputs=feature_extractor_input, outputs=feature_extractor_output, name="feature_extractor")
 
-            source_classifier_input = Input(shape=feature_extractor_output.shape[1:], name="feature_extractor_output")
-            source_classifier_output = all_layers[-1](source_classifier_input)
-            self.source_classifier = Model(inputs=source_classifier_input, outputs=source_classifier_output, name="source_classifier")
+            classifier_input = Input(shape=feature_extractor_output.shape[1:], name="feature_extractor_output")
+            classifier_output = all_layers[-1](classifier_input)
+            self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
 
         if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
@@ -68,8 +71,8 @@ class CORAL(PyRIIDModel):
             `ValueError` when no spectra are provided as input
         """
 
-        if source_ss.n_samples <= 0:
-            raise ValueError("No spectr[a|um] provided!")
+        if source_ss.n_samples <= 0 or target_ss.n_samples <= 0:
+            raise ValueError("Empty spectr[a|um] provided!")
 
         if source_ss.spectra_type == SpectraType.Gross:
             self.model_inputs = (ModelInput.GrossSpectrum,)
@@ -107,7 +110,7 @@ class CORAL(PyRIIDModel):
             for (x_s, y_s), x_t in zip(source_dataset, target_dataset):
                 with tf.GradientTape() as tape:
                     f_s = self.feature_extractor(x_s, training=True)
-                    preds_s = self.source_classifier(f_s, training=True)
+                    preds_s = self.classifier(f_s, training=True)
                     class_loss = self.classification_loss(y_s, preds_s)
 
                     f_t = self.feature_extractor(x_t, training=True)
@@ -139,7 +142,7 @@ class CORAL(PyRIIDModel):
         # Define CORAL model
         self.model = Model(
             inputs=self.feature_extractor.input,
-            outputs=self.source_classifier(self.feature_extractor.output)
+            outputs=self.classifier(self.feature_extractor.output)
         )
         self.model.compile(loss = self.classification_loss)
         

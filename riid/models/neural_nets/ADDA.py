@@ -1,12 +1,10 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from keras.utils import Sequence
-from tensorflow.keras.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten
+from tensorflow.keras.layers import Dense, Input
 from tensorflow.keras.losses import BinaryCrossentropy, cosine_similarity
-from tensorflow.keras.models import Model, clone_model
+from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l1, l2
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
@@ -16,15 +14,13 @@ from time import perf_counter as time
 
 class ADDA(PyRIIDModel):
     """Adversarial Discriminative Domain Adaptation classifier"""            
-    def __init__(self, activation=None, d_optimizer=None,
-                 t_optimizer=None, metrics=None, source_model=None,
-                 dense_layer_size=0):
+    def __init__(self, activation=None, d_optimizer=None, t_optimizer=None,
+                 source_model=None, dense_layer_size=0):
         """
         Args:
             activation: activation function to use for discriminator dense layer
             d_optimizer: tensorflow optimizer or optimizer name to use for training discriminator
             t_optimizer: tensorflow optimizer or optimizer name to use for training target encoder
-            metrics: list of metrics to be evaluating during training
             source_model: pretrained source model
             dense_layer_size: size of the dense layer in the discriminator
         """
@@ -33,15 +29,21 @@ class ADDA(PyRIIDModel):
         self.activation = activation
         self.d_optimizer = d_optimizer
         self.t_optimizer = t_optimizer
-        self.metrics = metrics
         self.dense_layer_size = dense_layer_size
         self.discriminator_loss = BinaryCrossentropy()
 
         if source_model is not None:
             self.classification_loss = source_model.loss
 
-            all_layers = source_model.layers
-            encoder_input = source_model.input
+            # Remove dropout layers for stability
+            config = source_model.get_config()
+            filtered_layers = [layer for layer in config["layers"] if layer["class_name"] != "Dropout"]
+            config["layers"] = filtered_layers
+            self.source_model = Model.from_config(config)
+            self.source_model.set_weights(source_model.get_weights())
+
+            all_layers = self.source_model.layers
+            encoder_input = self.source_model.input
             encoder_output = all_layers[-2].output
             self.source_encoder = Model(inputs=encoder_input, outputs=encoder_output, name="source_encoder")
             self.source_encoder.trainable = False
@@ -61,8 +63,6 @@ class ADDA(PyRIIDModel):
             self.d_optimizer = Adam(learning_rate=0.001)
         if self.t_optimizer is None:
             self.t_optimizer = Adam(learning_rate=0.001)
-        if self.metrics is None:
-            self.metrics = [APE_score]
 
         self.discriminator = None
         self.model = None
@@ -88,8 +88,8 @@ class ADDA(PyRIIDModel):
             `ValueError` when no spectra are provided as input
         """
 
-        if source_ss.n_samples <= 0:
-            raise ValueError("No spectr[a|um] provided!")
+        if source_ss.n_samples <= 0 or target_ss.n_samples <= 0:
+            raise ValueError("Empty spectr[a|um] provided!")
 
         if source_ss.spectra_type == SpectraType.Gross:
             self.model_inputs = (ModelInput.GrossSpectrum,)

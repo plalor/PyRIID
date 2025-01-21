@@ -1,13 +1,10 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from keras.utils import Sequence
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten, Layer
+from tensorflow.keras.layers import Dense, Input, Layer
 from tensorflow.keras.losses import CategoricalCrossentropy, cosine_similarity
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l1, l2
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
@@ -18,63 +15,53 @@ from time import perf_counter as time
 
 class DANN(PyRIIDModel):
     """Domain Adversarial Neural Network classifier."""
-    def __init__(self, activation=None, loss=None, optimizer=None,
-                 metrics=None, l2_alpha: float = 1e-4,
-                 activity_regularizer=None, final_activation=None,
-                 hidden_layers=None, dense_layer_size=None, grl_layer_size=0,
-                 gamma=10, dropout=0):
+    def __init__(self, optimizer=None, source_model=None, grl_layer_size=0,
+                 gamma=10):
         """
         Args:
-            activation: activation function to use for each dense layer
-            loss: loss function to use for training
             optimizer: tensorflow optimizer or optimizer name to use for training
-            metrics: list of metrics to be evaluating during training
-            l2_alpha: alpha value for the L2 regularization of each dense layer
-            activity_regularizer: regularizer function applied each dense layer output
-            final_activation: final activation function to apply to model output
-            hidden_layers: (filter, kernel_size) of each hidden laye of the CNN
-            dense_layer_size: size of the final dense layer after the convolutional layers
+            source_model: pretrained source model
             grl_layer_size: size of the gradient reversal dense layer
             gamma: hyperparameter for adjusting domain adaptation parameter
-            dropout: optional droupout layer after each hidden layer
         """
         super().__init__()
 
-        self.activation = activation
-        self.loss = loss
         self.optimizer = optimizer
-        self.metrics = metrics
-        self.l2_alpha = l2_alpha
-        self.activity_regularizer = activity_regularizer
-        self.final_activation = final_activation
-
-        self.hidden_layers = hidden_layers
-        self.dense_layer_size = dense_layer_size
         self.grl_layer_size = grl_layer_size
         self.gamma = gamma
-        self.dropout = dropout
 
-        if self.activation is None:
-            self.activation = "relu"
-        if self.loss is None:
-            self.loss = CategoricalCrossentropy()
+        if source_model is not None:
+            self.classification_loss = source_model.loss
+
+            # Remove dropout layers for stability
+            config = source_model.get_config()
+            filtered_layers = [layer for layer in config["layers"] if layer["class_name"] != "Dropout"]
+            config["layers"] = filtered_layer
+            self.source_model = Model.from_config(config)
+            self.source_model.set_weights(source_model.get_weights())
+
+            all_layers = self.source_model.layers
+            feature_extractor_input = self.source_model.input
+            feature_extractor_output = all_layers[-2].output
+            self.feature_extractor = Model(inputs=feature_extractor_input, outputs=feature_extractor_output, name="feature_extractor")
+
+            classifier_input = Input(shape=feature_extractor_output.shape[1:], name="feature_extractor_output")
+            classifier_output = all_layers[-1](classifier_input)
+            self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
+
         if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
-        if self.activity_regularizer is None:
-            self.activity_regularizer = l1(0.0)
-        if self.final_activation is None:
-            self.final_activation = "softmax"
 
         self.model = None
 
-    def fit(self, source_training_ss: SampleSet, target_training_ss: SampleSet, batch_size: int = 200, 
+    def fit(self, source_ss: SampleSet, target_ss: SampleSet, batch_size: int = 200,
             epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
-            source_training_ss: `SampleSet` of `n` training spectra from the source domain where `n` >= 1 
+            source_ss: `SampleSet` of `n` training spectra from the source domain where `n` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
-            target_training_ss: `SampleSet` of `m` training spectra from the target domain where `m` >= 1
+            target_ss: `SampleSet` of `m` training spectra from the target domain where `m` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
@@ -88,145 +75,101 @@ class DANN(PyRIIDModel):
             `ValueError` when no spectra are provided as input
         """
 
-        if source_training_ss.n_samples <= 0:
-            raise ValueError("No spectr[a|um] provided!")
+        if source_ss.n_samples <= 0 or target_ss.n_samples <= 0:
+            raise ValueError("Empty spectr[a|um] provided!")
 
-        if source_training_ss.spectra_type == SpectraType.Gross:
+        if source_ss.spectra_type == SpectraType.Gross:
             self.model_inputs = (ModelInput.GrossSpectrum,)
-        elif source_training_ss.spectra_type == SpectraType.Foreground:
+        elif source_ss.spectra_type == SpectraType.Foreground:
             self.model_inputs = (ModelInput.ForegroundSpectrum,)
-        elif source_training_ss.spectra_type == SpectraType.Background:
+        elif source_ss.spectra_type == SpectraType.Background:
             self.model_inputs = (ModelInput.BackgroundSpectrum,)
         else:
-            raise ValueError(f"{source_training_ss.spectra_type} is not supported in this model.")
+            raise ValueError(f"{source_ss.spectra_type} is not supported in this model.")
 
         ### Preparing training data
-        X_source_train = source_training_ss.get_samples()
-        X_target_train = target_training_ss.get_samples()
-        X_train = np.concatenate((X_source_train, X_target_train)).astype("float32")
+        X_source = source_ss.get_samples().astype("float32")
+        X_target = target_ss.get_samples().astype("float32")
                 
-        # Label predictor labels (set dummy labels for target domain)
-        source_contributions_df = source_training_ss.sources.T.groupby(target_level, sort=False).sum().T
+        # Class labels (set dummy labels for target domain)
+        source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T
         model_outputs = source_contributions_df.columns.values.tolist()
-        predictor_labels_source_train = source_contributions_df.values
-        dummy_labels = np.zeros((len(X_target_train), predictor_labels_source_train.shape[1]))
-        # predictor_labels_target_train = target_training_ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        predictor_labels_train = np.concatenate((predictor_labels_source_train, dummy_labels)).astype("float32")
+        class_labels_source = source_contributions_df.values.astype("float32")
+        dummy_labels = np.zeros((len(X_target), class_labels_source.shape[1]))
+        class_labels_target = dummy_labels.astype("float32")
         
         # Domain labels: 0 for source, 1 for target
-        domain_labels_source_train = np.zeros(len(X_source_train)).reshape(-1, 1)
-        domain_labels_target_train = np.ones(len(X_target_train)).reshape(-1, 1)
-        domain_labels_train = np.concatenate((domain_labels_source_train, domain_labels_target_train)).astype("float32")
-        
-        # Weights for label predictor (1 for source, 0 for target) and domain classifier (1 for all samples)
-        weights_label_predictor_train = np.concatenate((np.ones(len(X_source_train)), np.zeros(len(X_target_train)))).astype("float32")
-        weights_domain_classifier_train = np.ones(len(X_train)).astype("float32")
+        domain_labels_source = np.zeros((len(X_source), 1), dtype=np.float32)
+        domain_labels_target = np.ones((len(X_target), 1), dtype=np.float32)
 
-        # Shuffle the training data
-        num_source = len(X_source_train)
-        num_target = len(X_target_train)
-        if num_source == num_target:
-            print("Balanced source and target datasets, interweaving batches")
-            half_batch = batch_size // 2
-            source_indices = np.arange(num_source)
-            target_indices = np.arange(num_source, num_source + num_target)
-            np.random.shuffle(source_indices)
-            np.random.shuffle(target_indices)
-            num_batches = np.ceil((num_source + num_target) / batch_size).astype(int)
-            indices = []
-            for i in range(num_batches):
-                batch_source = source_indices[i*half_batch : (i+1)*half_batch]
-                batch_target = target_indices[i*half_batch : (i+1)*half_batch]
-                batch_indices = np.concatenate([batch_source, batch_target])
-                np.random.shuffle(batch_indices)
-                indices.append(batch_indices)
-            indices = np.concatenate(indices)
-        else:
-            print("WARNING: imbalanced source and target datasets")
-            indices = np.arange(X_train.shape[0])
-            np.random.shuffle(indices)
+        # Make datasets
+        half_batch_size = batch_size // 2
+        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, class_labels_source, domain_labels_source))
+        source_dataset = source_dataset.shuffle(len(X_source)).batch(half_batch_size)
+        target_dataset = tf.data.Dataset.from_tensor_slices((X_target, class_labels_target, domain_labels_target))
+        target_dataset = target_dataset.shuffle(len(X_target)).batch(half_batch_size)
+        combined_dataset = tf.data.Dataset.zip((source_dataset, target_dataset))
 
-        assert len(indices) == len(X_train)
-        X_train = X_train[indices]
-        predictor_labels_train = predictor_labels_train[indices]
-        domain_labels_train = domain_labels_train[indices]
-        weights_label_predictor_train = weights_label_predictor_train[indices]
-        weights_domain_classifier_train = weights_domain_classifier_train[indices]
-        
-        # Prepare label and weight dictionaries
-        labels_dict_train = {
-            "label_predictor": predictor_labels_train,
-            "domain_classifier": domain_labels_train
-        }
-        sample_weight_train = {
-            "label_predictor": weights_label_predictor_train,
-            "domain_classifier": weights_domain_classifier_train
-        }
+        def merge_batches(source_batch, target_batch):
+            X_s, y_s_cls, y_s_dom = source_batch
+            X_t, y_t_cls, y_t_dom = target_batch
+
+            X = tf.concat([X_s, X_t], axis=0)
+            class_labels = tf.concat([y_s_cls, y_t_cls], axis=0)
+            domain_labels = tf.concat([y_s_dom, y_t_dom], axis=0)
+            labels_dict = {"classifier": class_labels, "discriminator": domain_labels}
+
+            batch_size_s = tf.shape(X_s)[0]
+            batch_size_t = tf.shape(X_t)[0]
+            weights_classifier = tf.concat([
+                tf.ones((batch_size_s,), dtype=tf.float32),
+                tf.zeros((batch_size_t,), dtype=tf.float32)
+            ], axis=0)
+            weights_discriminator = tf.ones((batch_size_s + batch_size_t,), dtype=tf.float32)
+
+            weights_dict = {
+                "classifier": weights_classifier,
+                "discriminator": weights_discriminator
+            }
+
+            return X, labels_dict, weights_dict
+
+        combined_dataset = combined_dataset.map(merge_batches)
+
+        num_source_batches = int(np.ceil(len(X_source) / half_batch_size))
+        num_target_batches = int(np.ceil(len(X_target) / half_batch_size))
+        steps_per_epoch = min(num_source_batches, num_target_batches)
 
         if not self.model:
-            input_shape = X_train.shape[1]
-            inputs = Input(shape=(input_shape,1), name="Spectrum")
-            if self.hidden_layers is None:
-                self.hidden_layers = [(32, 5), (64, 3)]
+            inputs = self.feature_extractor.input
+            features = self.feature_extractor(inputs)
+            class_labels = self.classifier(features)
 
-            # Feature extractor
-            x = inputs
-            for layer, (filters, kernel_size) in enumerate(self.hidden_layers):
-                x = Conv1D(
-                    filters=filters,
-                    kernel_size=kernel_size,
-                    activation=self.activation,
-                    activity_regularizer=self.activity_regularizer,
-                    kernel_regularizer=l2(self.l2_alpha),
-                    name=f"conv_{layer}"
-                )(x)
-                x = MaxPooling1D(pool_size=2)(x)
-                
-                if self.dropout > 0:
-                    x = Dropout(self.dropout)(x)
-
-            x = Flatten()(x)
-            if self.dense_layer_size is None:
-                self.dense_layer_size = input_shape//2
-            x = Dense(self.dense_layer_size, activation=self.activation)(x)
-            if self.dropout > 0:
-                x = Dropout(self.dropout)(x)
-
-            # Label predictor
-            label_outputs = Dense(predictor_labels_train.shape[1],
-                                  activation=self.final_activation,
-                                  name="label_predictor")(x)
-
-            # Domain classifier branch with GRL
             grl_layer = GradientReversalLayer()
-            grl = grl_layer(x)
+            grl = grl_layer(features)
             if self.grl_layer_size:
-                grl = Dense(self.grl_layer_size, activation='relu')(grl)
-            domain_output = Dense(1, activation="sigmoid", name="domain_classifier")(grl)
+                grl = Dense(self.grl_layer_size, activation="relu")(grl)
+            domain_labels = Dense(1, activation="sigmoid", name="discriminator")(grl)
 
-            # Combined model            
-            self.model = Model(inputs, outputs={
-                "label_predictor": label_outputs,
-                "domain_classifier": domain_output
+            self.model = Model(inputs=inputs, outputs={
+                "classifier": class_labels,
+                "discriminator": domain_labels
             })
+
             self.model.compile(
-                loss={"label_predictor": self.loss, "domain_classifier": "binary_crossentropy"},
+                loss={"classifier": self.classification_loss, "discriminator": "binary_crossentropy"},
                 optimizer=self.optimizer,
-                metrics=self.metrics
             )
 
         lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=grl_layer)
 
         t0 = time()
         history = self.model.fit(
-            x=X_train,
-            y=labels_dict_train,
-            sample_weight=sample_weight_train,
-            batch_size=batch_size,
+            combined_dataset,
             epochs=epochs,
+            steps_per_epoch=steps_per_epoch,
             verbose=verbose,
-            callbacks=(lambda_scheduler),
-            shuffle=False,
+            callbacks=[lambda_scheduler],
         )
         self.history = history.history
         self.history["training_time"] = time() - t0
@@ -235,7 +178,7 @@ class DANN(PyRIIDModel):
         self._update_info(
             target_level=target_level,
             model_outputs=model_outputs,
-            normalization=source_training_ss.spectra_state,
+            normalization=source_ss.spectra_state,
         )
 
         return history
@@ -256,7 +199,7 @@ class DANN(PyRIIDModel):
         else:
             X = x_test
 
-        results = self.model.predict(X, batch_size=1000)["label_predictor"]
+        results = self.model.predict(X, batch_size=1000)["classifier"]
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]
@@ -292,14 +235,14 @@ class DANN(PyRIIDModel):
         self.predict(ss)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        loss = self.model.loss["label_predictor"](y_true, y_pred).numpy()
+        loss = self.model.loss["classifier"](y_true, y_pred).numpy()
         return loss
 
     def calc_domain_accuracy(self, ss: SampleSet, domain_label: int):
         """Calculate the domain classification accuracy on ss"""
         x_test = ss.get_samples().astype(float)
         preds = self.model.predict(x_test, batch_size=1000)
-        domain_preds = np.round(preds["domain_classifier"]).astype(int).flatten()
+        domain_preds = np.round(preds["discriminator"]).astype(int).flatten()
         domain_labels = np.full(shape=(len(x_test),), fill_value=domain_label, dtype=int)
         accuracy = accuracy_score(domain_labels, domain_preds)
         return accuracy
