@@ -118,8 +118,6 @@ class CNN(PyRIIDModel):
         if not self.model:
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,1), name="Spectrum")
-            if self.hidden_layers is None:
-                self.hidden_layers = [(32, 5), (64, 3)]
             x = inputs
             for layer, (filters, kernel_size) in enumerate(self.hidden_layers):
                 x = Conv1D(
@@ -130,18 +128,16 @@ class CNN(PyRIIDModel):
                     kernel_regularizer=l2(self.l2_alpha),
                     name=f"conv_{layer}"
                 )(x)
-                x = MaxPooling1D(pool_size=2)(x)
+                x = MaxPooling1D(pool_size=2, name=f"maxpool_{layer}")(x)
                 
                 if self.dropout > 0:
-                    x = Dropout(self.dropout)(x)
+                    x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
 
-            x = Flatten()(x)
-            if self.dense_layer_size is None:
-                self.dense_layer_size = input_shape//2
-            x = Dense(self.dense_layer_size, activation=self.activation)(x)
+            x = Flatten(name="flatten")(x)
+            x = Dense(self.dense_layer_size, activation=self.activation, name="dense_layer")(x)
             if self.dropout > 0:
-                x = Dropout(self.dropout)(x)
-            outputs = Dense(Y_train.shape[1], activation=self.final_activation)(x)
+                x = Dropout(self.dropout, name="dropout_layer")(x)
+            outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
             self.model = Model(inputs, outputs)
             self.model.compile(loss=self.loss, optimizer=self.optimizer,
                                metrics=self.metrics)

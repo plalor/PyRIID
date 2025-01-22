@@ -126,11 +126,11 @@ class Transformer(PyRIIDModel):
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
             seq_length = input_shape // self.patch_size
-            x = layers.Reshape((seq_length, self.patch_size))(inputs)
-            x = Dense(self.embed_dim)(x)
+            x = layers.Reshape((seq_length, self.patch_size), name="reshape_patches")(inputs)
+            x = Dense(self.embed_dim, name="dense_embedding")(x)
 
-            positions = tf.range(start=0, limit=seq_length, delta=1)
-            position_embedding = layers.Embedding(input_dim=seq_length, output_dim=self.embed_dim)(positions)
+            positions = tf.range(start=0, limit=seq_length, delta=1, name="position_indices")
+            position_embedding = layers.Embedding(input_dim=seq_length, output_dim=self.embed_dim, name="position_embedding")(positions)
             x = x + position_embedding
 
             for layer in range(self.num_layers):
@@ -138,19 +138,19 @@ class Transformer(PyRIIDModel):
                                                 key_dim=self.embed_dim // self.num_heads,
                                                 name=f"multi_head_attention_{layer}")(x, x)
                 if self.dropout > 0:
-                    attention_output = Dropout(self.dropout)(attention_output)
-                attention_output = layers.LayerNormalization(epsilon=1e-6)(x + attention_output)
+                    attention_output = Dropout(self.dropout, name=f"mha_dropout_{layer}")(attention_output)
+                attention_output = layers.LayerNormalization(epsilon=1e-6, name=f"mha_layernorm_{layer}")(x + attention_output)
                 ffn_output = layers.Dense(self.ff_dim, activation=self.activation, name=f"ffn_dense1_{layer}")(attention_output)
                 ffn_output = layers.Dense(self.embed_dim, name=f"ffn_dense2_{layer}")(ffn_output)
                 if self.dropout > 0:
-                    attention_output = Dropout(self.dropout)(attention_output)
-                x = layers.LayerNormalization(epsilon=1e-6)(attention_output + ffn_output)
+                    ffn_output = Dropout(self.dropout, name=f"ffn_dropout_{layer}")(ffn_output)
+                x = layers.LayerNormalization(epsilon=1e-6, name=f"ffn_layernorm_{layer}")(attention_output + ffn_output)
             
-            x = layers.GlobalAveragePooling1D()(x)
+            x = layers.GlobalAveragePooling1D(name="global_avg_pool")(x)
             if self.dropout > 0:
-                x = Dropout(self.dropout)(x)
+                x = Dropout(self.dropout, name="dropout_layer")(x)
 
-            outputs = Dense(Y_train.shape[1], activation=self.final_activation)(x)
+            outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
             self.model = Model(inputs, outputs)
             self.model.compile(loss=self.loss, optimizer=self.optimizer,
                                metrics=self.metrics)

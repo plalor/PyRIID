@@ -117,7 +117,7 @@ class LSTMClassifier(PyRIIDModel):
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
             seq_length = input_shape // self.patch_size
-            x = Reshape((seq_length, self.patch_size))(inputs)
+            x = Reshape((seq_length, self.patch_size), name="reshape_patches")(inputs)
 
             for layer, units in enumerate(self.hidden_layers):
                 return_sequences = layer < len(self.hidden_layers) - 1
@@ -147,8 +147,7 @@ class LSTMClassifier(PyRIIDModel):
                              name=f"lstm_{layer}",
                             )
                 x = lstm_layer(x)
-            x = Flatten()(x)
-            outputs = Dense(Y_train.shape[1], activation=self.final_activation)(x)
+            outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
             self.model = Model(inputs, outputs)
             self.model.compile(loss=self.loss, optimizer=self.optimizer,
                                metrics=self.metrics)

@@ -116,8 +116,6 @@ class MLP(PyRIIDModel):
         if not self.model:
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
-            if self.hidden_layers is None:
-                self.hidden_layers = (input_shape//2,)
             x = inputs
             for layer, nodes in enumerate(self.hidden_layers):
                 x = Dense(
@@ -129,9 +127,9 @@ class MLP(PyRIIDModel):
                 )(x)
                 
                 if self.dropout > 0:
-                    x = Dropout(self.dropout)(x)
+                    x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
 
-            outputs = Dense(Y_train.shape[1], activation=self.final_activation)(x)
+            outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
             self.model = Model(inputs, outputs)
             self.model.compile(loss=self.loss, optimizer=self.optimizer,
                                metrics=self.metrics)
