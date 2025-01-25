@@ -36,7 +36,7 @@ class DANN(PyRIIDModel):
             # Remove dropout layers for stability
             config = source_model.get_config()
             filtered_layers = [layer for layer in config["layers"] if layer["class_name"] != "Dropout"]
-            config["layers"] = filtered_layer
+            config["layers"] = filtered_layers
             self.source_model = Model.from_config(config)
             self.source_model.set_weights(source_model.get_weights())
 

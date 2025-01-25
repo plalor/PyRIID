@@ -3,7 +3,7 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Input
 from tensorflow.keras.losses import BinaryCrossentropy, cosine_similarity
-from tensorflow.keras.models import Model
+from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
