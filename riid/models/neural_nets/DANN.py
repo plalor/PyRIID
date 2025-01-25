@@ -103,13 +103,6 @@ class DANN(PyRIIDModel):
         domain_labels_target = np.ones((len(X_target), 1), dtype=np.float32)
 
         # Make datasets
-        half_batch_size = batch_size // 2
-        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, class_labels_source, domain_labels_source))
-        source_dataset = source_dataset.shuffle(len(X_source)).batch(half_batch_size)
-        target_dataset = tf.data.Dataset.from_tensor_slices((X_target, class_labels_target, domain_labels_target))
-        target_dataset = target_dataset.shuffle(len(X_target)).batch(half_batch_size)
-        combined_dataset = tf.data.Dataset.zip((source_dataset, target_dataset))
-
         def merge_batches(source_batch, target_batch):
             X_s, y_s_cls, y_s_dom = source_batch
             X_t, y_t_cls, y_t_dom = target_batch
@@ -134,11 +127,13 @@ class DANN(PyRIIDModel):
 
             return X, labels_dict, weights_dict
 
+        half_batch_size = batch_size // 2
+        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, class_labels_source, domain_labels_source))
+        source_dataset = source_dataset.shuffle(len(X_source)).batch(half_batch_size)
+        target_dataset = tf.data.Dataset.from_tensor_slices((X_target, class_labels_target, domain_labels_target))
+        target_dataset = target_dataset.shuffle(len(X_target)).batch(half_batch_size)
+        combined_dataset = tf.data.Dataset.zip((source_dataset, target_dataset))
         combined_dataset = combined_dataset.map(merge_batches)
-
-        num_source_batches = int(np.ceil(len(X_source) / half_batch_size))
-        num_target_batches = int(np.ceil(len(X_target) / half_batch_size))
-        steps_per_epoch = min(num_source_batches, num_target_batches)
 
         if not self.model:
             inputs = self.feature_extractor.input
@@ -167,7 +162,6 @@ class DANN(PyRIIDModel):
         history = self.model.fit(
             combined_dataset,
             epochs=epochs,
-            steps_per_epoch=steps_per_epoch,
             verbose=verbose,
             callbacks=[lambda_scheduler],
         )

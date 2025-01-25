@@ -170,7 +170,6 @@ class Transformer(PyRIIDModel):
         t0 = time()
         history = self.model.fit(
             training_dataset,
-            batch_size=batch_size,
             epochs=epochs,
             verbose=verbose,
             validation_data=validation_dataset,
