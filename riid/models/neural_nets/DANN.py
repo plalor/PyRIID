@@ -145,8 +145,8 @@ class DANN(PyRIIDModel):
             features = self.feature_extractor(inputs)
             class_labels = self.classifier(features)
 
-            grl_layer = GradientReversalLayer()
-            grl = grl_layer(features)
+            self.grl_layer = GradientReversalLayer()
+            grl = self.grl_layer(features)
             if self.grl_layer_size:
                 grl = Dense(self.grl_layer_size, activation="relu")(grl)
             domain_labels = Dense(1, activation="sigmoid", name="discriminator")(grl)
@@ -161,7 +161,7 @@ class DANN(PyRIIDModel):
                 optimizer=self.optimizer,
             )
 
-        lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=grl_layer)
+        lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=self.grl_layer)
 
         t0 = time()
         history = self.model.fit(
