@@ -16,19 +16,21 @@ from time import perf_counter as time
 class DANN(PyRIIDModel):
     """Domain Adversarial Neural Network classifier."""
     def __init__(self, optimizer=None, source_model=None, grl_layer_size=0,
-                 gamma=10):
+                 gamma=10, lmbda=0):
         """
         Args:
             optimizer: tensorflow optimizer or optimizer name to use for training
             source_model: pretrained source model
             grl_layer_size: size of the gradient reversal dense layer
             gamma: hyperparameter for adjusting domain adaptation parameter
+            lmbda: domain adaptation parameter. Ignored if gamma is specified
         """
         super().__init__()
 
         self.optimizer = optimizer
         self.grl_layer_size = grl_layer_size
         self.gamma = gamma
+        self.lmbda = lmbda
 
         if source_model is not None:
             self.classification_loss = source_model.loss
@@ -48,21 +50,23 @@ class DANN(PyRIIDModel):
             classifier_input = Input(shape=feature_extractor_output.shape[1:], name="feature_extractor_output")
             classifier_output = all_layers[-1](classifier_input)
             self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
-
+            
         if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
 
         self.model = None
 
-    def fit(self, source_ss: SampleSet, target_ss: SampleSet, batch_size: int = 200,
-            epochs: int = 20, target_level="Isotope", verbose: bool = False):
+    def fit(self, source_ss: SampleSet, target_ss: SampleSet, validation_ss: SampleSet, 
+            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
             source_ss: `SampleSet` of `n` training spectra from the source domain where `n` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
-            target_ss: `SampleSet` of `m` training spectra from the target domain where `m` >= 1
+            target_ss: `SampleSet` of `n` training spectra from the target domain where `n` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
+            validation_ss: `SampleSet` of `m` validation spectra from the target domain where 
+                `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
             target_level: `SampleSet.sources` column level to use
@@ -90,6 +94,12 @@ class DANN(PyRIIDModel):
         ### Preparing training data
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
+
+        ### Preparing validation data
+        X_validation = validation_ss.get_samples().astype("float32")
+        validation_contributions_df = validation_ss.sources.T.groupby(target_level, sort=False).sum().T
+        y_validation = validation_contributions_df.values.astype("float32")
+        validation_data = (X_validation, y_validation)
                 
         # Class labels (set dummy labels for target domain)
         source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T
@@ -156,14 +166,20 @@ class DANN(PyRIIDModel):
                 optimizer=self.optimizer,
             )
 
-        lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=self.grl_layer)
+        if self.gamma > 0:
+            lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=self.grl_layer)
+            callbacks = [lambda_scheduler]
+        else:
+            tf.keras.backend.set_value(self.grl_layer.lmbda, self.lmbda)
+            callbacks = []
+        callbacks.append(ValidationCallback(validation_data))
 
         t0 = time()
         history = self.model.fit(
             combined_dataset,
             epochs=epochs,
             verbose=verbose,
-            callbacks=[lambda_scheduler],
+            callbacks=callbacks,
         )
         self.history = history.history
         self.history["training_time"] = time() - t0
@@ -267,3 +283,24 @@ class LambdaScheduler(tf.keras.callbacks.Callback):
         p = epoch / self.total_epochs
         new_lmbda = 2 / (1 + np.exp(-self.gamma * p)) - 1
         tf.keras.backend.set_value(self.grl_layer.lmbda, new_lmbda)
+
+
+class ValidationCallback(tf.keras.callbacks.Callback):
+    def __init__(self, validation_data):
+        super().__init__()
+        self.validation_data = validation_data
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            logs = {}
+
+        metrics = self.evaluate_domain(self.validation_data)
+        logs["val_ape_score"] = metrics["ape_score"]
+
+    def evaluate_domain(self, data):
+        X_validation, y_validation = data
+
+        y_pred = self.model.predict(X_validation, batch_size=1000, verbose=0)["classifier"]
+        ape_score = APE_score(y_validation, y_pred).numpy()
+
+        return {"ape_score": ape_score}
