@@ -67,8 +67,8 @@ class ADDA(PyRIIDModel):
         self.discriminator = None
         self.model = None
 
-    def fit(self, source_ss: SampleSet, target_ss: SampleSet, batch_size: int = 200, epochs: int = 20,
-            target_level="Isotope", verbose: bool = False):
+    def fit(self, source_ss: SampleSet, target_ss: SampleSet, validation_ss: SampleSet,
+            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -76,6 +76,8 @@ class ADDA(PyRIIDModel):
                 and the spectra are either foreground (AKA, "net") or gross.
             target_ss: `SampleSet` of `n` training spectra from the target domain where `n` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
+            validation_ss: `SampleSet` of `m` validation spectra from the target domain where 
+                `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
             target_level: `SampleSet.sources` column level to use
@@ -124,38 +126,51 @@ class ADDA(PyRIIDModel):
             output = Dense(1, activation="sigmoid", name="discriminator")(x)
             self.discriminator = Model(inputs, output)
 
-        # Training loop
-        self.history = {"d_loss": [], "t_loss": []}
-        t0 = time()
-        for epoch in range(epochs):
-            if verbose:
-                print(f"Epoch {epoch+1}/{epochs}...", end="")
-                t1 = time()
-    
-            for (x_s, y_s), (x_t, y_t) in zip(source_dataset, target_dataset):
-                d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
-                t_loss = self.train_target_encoder_step(x_t)
-    
-            self.history["d_loss"].append(float(d_loss))
-            self.history["t_loss"].append(float(t_loss))
-
-            if verbose:
-                print(f"finished in {time()-t1:.0f} seconds")
-                print(f"  d_loss={d_loss:.4f}  t_loss={t_loss:.4f}")
-        self.history["training_time"] = time() - t0
-        
         # Define ADDA model using target encoder and source classifier
         self.model = Model(
             inputs=self.target_encoder.input,
             outputs=self.source_classifier(self.target_encoder.output)
         )
         self.model.compile(loss = self.classification_loss)
+
         self._update_info(
             target_level=target_level,
             model_outputs = source_ss.sources.T.groupby(target_level, sort=False).sum().T.columns.values.tolist(),
             normalization=source_ss.spectra_state,
         )
-        
+
+        # Training loop
+        self.history = {"d_loss": [], "t_loss": [], "val_ape_score": []}
+        best_val_ape = -np.inf
+        best_weights = None
+        t0 = time()
+        for epoch in range(epochs):
+            if verbose:
+                print(f"Epoch {epoch+1}/{epochs}")
+                t1 = time()
+
+            for (x_s, y_s), (x_t, y_t) in zip(source_dataset, target_dataset):
+                d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
+                t_loss = self.train_target_encoder_step(x_t)
+
+            val_ape_score = self.calc_APE_score(validation_ss, target_level=target_level)
+            self.history["d_loss"].append(float(d_loss))
+            self.history["t_loss"].append(float(t_loss))
+            self.history["val_ape_score"].append(val_ape_score)
+
+            # Save best model weights based on the validation APE score
+            if val_ape_score > best_val_ape:
+                best_val_ape = val_ape_score
+                best_weights = self.model.get_weights()
+
+            if verbose:
+                print(f"Finished in {time()-t1:.0f} seconds")
+                print(f"  d_loss: {d_loss:.4f} - t_loss: {t_loss:.4f} - val_ape_score: {val_ape_score:.4f}")
+
+        self.history["training_time"] = time() - t0
+        if best_weights is not None:
+            self.model.set_weights(best_weights)
+
         return self.history
 
     def predict(self, ss: SampleSet, bg_ss: SampleSet = None):

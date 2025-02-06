@@ -50,8 +50,8 @@ class CORAL(PyRIIDModel):
 
         self.model = None
 
-    def fit(self, source_ss: SampleSet, target_ss: SampleSet, batch_size: int = 200,
-            epochs: int = 20, target_level="Isotope", verbose: bool = False):
+    def fit(self, source_ss: SampleSet, target_ss: SampleSet, validation_ss: SampleSet,
+            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -59,6 +59,8 @@ class CORAL(PyRIIDModel):
                 and the spectra are either foreground (AKA, "net") or gross.
             target_ss: `SampleSet` of `n` training spectra from the target domain where `n` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
+            validation_ss: `SampleSet` of `m` validation spectra from the target domain where 
+                `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
             target_level: `SampleSet.sources` column level to use
@@ -97,12 +99,30 @@ class CORAL(PyRIIDModel):
         target_dataset = tf.data.Dataset.from_tensor_slices((X_target))
         target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
 
-        self.history = {"class_loss": [], "total_loss": [], "coral_loss": []}
+        # Define CORAL model
+        self.model = Model(
+            inputs=self.feature_extractor.input,
+            outputs=self.classifier(self.feature_extractor.output)
+        )
+        self.model.compile(loss = self.classification_loss)
+
+        # Update model information
+        self._update_info(
+            target_level=target_level,
+            model_outputs=model_outputs,
+            normalization=source_ss.spectra_state,
+        )
+
+        # Training loop
+        self.history = {"class_loss": [], "total_loss": [], "coral_loss": [], "val_ape_score": []}
+        best_val_ape = -np.inf
+        best_weights = None
         t0 = time()
         for epoch in range(epochs):
             if verbose:
-                print(f"Epoch {epoch+1}/{epochs}...", end="")
+                print(f"Epoch {epoch+1}/{epochs}")
                 t1 = time()
+
             total_loss_avg = tf.metrics.Mean()
             class_loss_avg = tf.metrics.Mean()
             coral_loss_avg = tf.metrics.Mean()
@@ -126,32 +146,29 @@ class CORAL(PyRIIDModel):
                 class_loss_avg.update_state(class_loss)
                 coral_loss_avg.update_state(coral_val)
 
+            val_ape_score = self.calc_APE_score(validation_ss, target_level=target_level)
             self.history["class_loss"].append(float(total_loss_avg.result()))
             self.history["total_loss"].append(float(class_loss_avg.result()))
             self.history["coral_loss"].append(float(coral_loss_avg.result()))
+            self.history["val_ape_score"].append(val_ape_score)
+
+            # Save best model weights based on the validation APE score
+            if val_ape_score > best_val_ape:
+                best_val_ape = val_ape_score
+                best_weights = self.model.get_weights()
 
             if verbose:
-                print(f"finished in {time()-t1:.0f} seconds")
+                print(f"Finished in {time()-t1:.0f} seconds")
                 print("  "
-                    f"total_loss={total_loss_avg.result():.4f}  "
-                    f"class_loss={class_loss_avg.result():.4f}  "
-                    f"coral_loss={coral_loss_avg.result():.4f}"
+                    f"total_loss: {total_loss_avg.result():.4f} - "
+                    f"class_loss: {class_loss_avg.result():.4f} - "
+                    f"coral_loss: {coral_loss_avg.result():.4f} - "
+                    f"val_ape_score: {val_ape_score:.4f}"
                 )
-        self.history["training_time"] = time() - t0
 
-        # Define CORAL model
-        self.model = Model(
-            inputs=self.feature_extractor.input,
-            outputs=self.classifier(self.feature_extractor.output)
-        )
-        self.model.compile(loss = self.classification_loss)
-        
-        # Update model information
-        self._update_info(
-            target_level=target_level,
-            model_outputs=model_outputs,
-            normalization=source_ss.spectra_state,
-        )
+        self.history["training_time"] = time() - t0
+        if best_weights is not None:
+            self.model.set_weights(best_weights)
 
         return self.history
 

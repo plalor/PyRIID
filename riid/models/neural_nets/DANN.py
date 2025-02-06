@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Layer
 from tensorflow.keras.losses import CategoricalCrossentropy, cosine_similarity
 from tensorflow.keras.models import Model
@@ -57,7 +58,9 @@ class DANN(PyRIIDModel):
         self.model = None
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, validation_ss: SampleSet, 
-            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
+            batch_size: int = 200, epochs: int = 20, callbacks = None, patience: int = 10**4, 
+            es_monitor: str = "val_ape_score", es_mode: str = "max", es_verbose=0, 
+            target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -69,6 +72,11 @@ class DANN(PyRIIDModel):
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
+            callbacks: list of callbacks to be passed to the TensorFlow `Model.fit()` method
+            patience: number of epochs to wait for `EarlyStopping` object
+            es_monitor: quantity to be monitored for `EarlyStopping` object
+            es_mode: mode for `EarlyStopping` object
+            es_verbose: verbosity level for `EarlyStopping` object
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
 
@@ -94,12 +102,6 @@ class DANN(PyRIIDModel):
         ### Preparing training data
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
-
-        ### Preparing validation data
-        X_validation = validation_ss.get_samples().astype("float32")
-        validation_contributions_df = validation_ss.sources.T.groupby(target_level, sort=False).sum().T
-        y_validation = validation_contributions_df.values.astype("float32")
-        validation_data = (X_validation, y_validation)
                 
         # Class labels (set dummy labels for target domain)
         source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T
@@ -166,13 +168,30 @@ class DANN(PyRIIDModel):
                 optimizer=self.optimizer,
             )
 
+        self._update_info(
+            target_level=target_level,
+            model_outputs = source_ss.sources.T.groupby(target_level, sort=False).sum().T.columns.values.tolist(),
+            normalization=source_ss.spectra_state,
+        )
+
+        es = EarlyStopping(
+            monitor=es_monitor,
+            patience=patience,
+            verbose=es_verbose,
+            restore_best_weights=True,
+            mode=es_mode,
+        )
+        vc = ValidationCallback(self, validation_ss, target_level)
+        if callbacks:
+            callbacks.append(vc)
+        else:
+            callbacks = [vc]
         if self.gamma > 0:
             lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=self.grl_layer)
-            callbacks = [lambda_scheduler]
+            callbacks.append(lambda_scheduler)
         else:
             tf.keras.backend.set_value(self.grl_layer.lmbda, self.lmbda)
-            callbacks = []
-        callbacks.append(ValidationCallback(validation_data))
+        callbacks.append(es)
 
         t0 = time()
         history = self.model.fit(
@@ -183,13 +202,6 @@ class DANN(PyRIIDModel):
         )
         self.history = history.history
         self.history["training_time"] = time() - t0
-
-        # Update model information
-        self._update_info(
-            target_level=target_level,
-            model_outputs=model_outputs,
-            normalization=source_ss.spectra_state,
-        )
 
         return history
 
@@ -286,21 +298,15 @@ class LambdaScheduler(tf.keras.callbacks.Callback):
 
 
 class ValidationCallback(tf.keras.callbacks.Callback):
-    def __init__(self, validation_data):
+    def __init__(self, DANN_instance, validation_ss, target_level="Isotope"):
         super().__init__()
-        self.validation_data = validation_data
+        self.DANN_instance = DANN_instance
+        self.validation_ss = validation_ss
+        self.target_level = target_level
 
     def on_epoch_end(self, epoch, logs=None):
         if logs is None:
             logs = {}
 
-        metrics = self.evaluate_domain(self.validation_data)
-        logs["val_ape_score"] = metrics["ape_score"]
-
-    def evaluate_domain(self, data):
-        X_validation, y_validation = data
-
-        y_pred = self.model.predict(X_validation, batch_size=1000, verbose=0)["classifier"]
-        ape_score = APE_score(y_validation, y_pred).numpy()
-
-        return {"ape_score": ape_score}
+        ape_score = self.DANN_instance.calc_APE_score(self.validation_ss, target_level=self.target_level)
+        logs["val_ape_score"] = ape_score
