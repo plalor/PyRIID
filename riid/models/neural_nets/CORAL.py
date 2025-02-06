@@ -147,8 +147,8 @@ class CORAL(PyRIIDModel):
                 coral_loss_avg.update_state(coral_val)
 
             val_ape_score = self.calc_APE_score(validation_ss, target_level=target_level)
-            self.history["class_loss"].append(float(total_loss_avg.result()))
-            self.history["total_loss"].append(float(class_loss_avg.result()))
+            self.history["class_loss"].append(float(class_loss_avg.result()))
+            self.history["total_loss"].append(float(total_loss_avg.result()))
             self.history["coral_loss"].append(float(coral_loss_avg.result()))
             self.history["val_ape_score"].append(val_ape_score)
 
