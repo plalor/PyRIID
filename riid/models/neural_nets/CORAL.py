@@ -128,20 +128,7 @@ class CORAL(PyRIIDModel):
             coral_loss_avg = tf.metrics.Mean()
 
             for (x_s, y_s), x_t in zip(source_dataset, target_dataset):
-                with tf.GradientTape() as tape:
-                    f_s = self.feature_extractor(x_s, training=True)
-                    preds_s = self.classifier(f_s, training=True)
-                    class_loss = self.classification_loss(y_s, preds_s)
-
-                    f_t = self.feature_extractor(x_t, training=True)
-                    coral_val = self.coral_loss(f_s, f_t)
-                    total_loss = class_loss + self.lmbda * coral_val
-
-                # Gradients wrt ALL trainable variables in the source_model
-                # (feature_extractor + final Dense). 
-                grads = tape.gradient(total_loss, self.source_model.trainable_variables)
-                self.optimizer.apply_gradients(zip(grads, self.source_model.trainable_variables))
-
+                total_loss, class_loss, coral_val = self.train_step(x_s, y_s, x_t)
                 total_loss_avg.update_state(total_loss)
                 class_loss_avg.update_state(class_loss)
                 coral_loss_avg.update_state(coral_val)
@@ -242,3 +229,18 @@ class CORAL(PyRIIDModel):
         cov_target = tf.matmul(tf.transpose(t_centered), t_centered)
 
         return tf.reduce_mean(tf.square(cov_source - cov_target))
+
+    @tf.function
+    def train_step(self, x_s, y_s, x_t):
+        with tf.GradientTape() as tape:
+            f_s = self.feature_extractor(x_s, training=True)
+            preds_s = self.classifier(f_s, training=True)
+            class_loss = self.classification_loss(y_s, preds_s)
+
+            f_t = self.feature_extractor(x_t, training=True)
+            coral_val = self.coral_loss(f_s, f_t)
+            total_loss = class_loss + self.lmbda * coral_val
+
+        grads = tape.gradient(total_loss, self.source_model.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.source_model.trainable_variables))
+        return total_loss, class_loss, coral_val
