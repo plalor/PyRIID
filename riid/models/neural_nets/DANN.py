@@ -3,7 +3,7 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Layer
-from tensorflow.keras.losses import CategoricalCrossentropy, cosine_similarity
+from tensorflow.keras.losses import cosine_similarity
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 
@@ -51,6 +51,8 @@ class DANN(PyRIIDModel):
             classifier_input = Input(shape=feature_extractor_output.shape[1:], name="feature_extractor_output")
             classifier_output = all_layers[-1](classifier_input)
             self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
+        else:
+            raise ValueError("A pretrained source model must be provided")
             
         if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)

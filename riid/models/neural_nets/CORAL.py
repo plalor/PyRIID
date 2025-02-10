@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.layers import Input
-from tensorflow.keras.losses import CategoricalCrossentropy, cosine_similarity
+from tensorflow.keras.losses import cosine_similarity
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 
@@ -44,6 +44,8 @@ class CORAL(PyRIIDModel):
             classifier_input = Input(shape=feature_extractor_output.shape[1:], name="feature_extractor_output")
             classifier_output = all_layers[-1](classifier_input)
             self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
+        else:
+            raise ValueError("A pretrained source model must be provided")
 
         if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
@@ -147,11 +149,10 @@ class CORAL(PyRIIDModel):
             if verbose:
                 print(f"Finished in {time()-t1:.0f} seconds")
                 print("  "
-                    f"total_loss: {total_loss_avg.result():.4f} - "
-                    f"class_loss: {class_loss_avg.result():.4f} - "
-                    f"coral_loss: {coral_loss_avg.result():.4f} - "
-                    f"val_ape_score: {val_ape_score:.4f}"
-                )
+                      f"total_loss: {total_loss_avg.result():.4f} - "
+                      f"class_loss: {class_loss_avg.result():.4f} - "
+                      f"coral_loss: {coral_loss_avg.result():.4f} - "
+                      f"val_ape_score: {val_ape_score:.4f}")
 
         self.history["training_time"] = time() - t0
         if best_weights is not None:
