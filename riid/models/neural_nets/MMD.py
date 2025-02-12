@@ -12,27 +12,22 @@ from riid.metrics import APE_score
 from time import perf_counter as time
 
 
-class DeepJDOT(PyRIIDModel):
-    """Classifier using DeepJDOT (Deep Joint Distribution Optimal Transport) domain adaptation."""
-    def __init__(self, optimizer=None, source_model=None, ot_weight=1.0, sinkhorn_reg=0.1, 
-                 num_sinkhorn_iters=10, jdot_alpha=1.0, jdot_beta=1.0):
+class MMD(PyRIIDModel):
+    """Classifier using Deep Adaptation Networks (DAN) for domain adaptation via 
+    Maximum Mean Discrepancy  (MMD)."""
+    def __init__(self, optimizer=None, source_model=None, lmbda=1, sigma=1.0):
         """
         Args:
             optimizer: tensorflow optimizer or optimizer name
-            source_model: Pretrained source model.
-            ot_weight: Weight for the OT loss term.
-            sinkhorn_reg: Entropic regularization parameter for Sinkhorn iterations.
-            num_sinkhorn_iters: Number of iterations in the Sinkhorn algorithm.
-            jdot_alpha: Weight for the feature-distance term in the cost matrix.
-            jdot_beta: Weight for the classification loss term in the cost matrix.
+            source_model: pretrained source model
+            lmbda: weight for the MMD loss
+            sigma: bandwidth parameter for the Gaussian kernel used in MMD
         """
         super().__init__()
+
         self.optimizer = optimizer
-        self.ot_weight = ot_weight
-        self.sinkhorn_reg = sinkhorn_reg
-        self.num_sinkhorn_iters = num_sinkhorn_iters
-        self.jdot_alpha = jdot_alpha
-        self.jdot_beta = jdot_beta
+        self.lmbda = lmbda
+        self.sigma = sigma
 
         if source_model is not None:
             self.classification_loss = source_model.loss
@@ -82,9 +77,9 @@ class DeepJDOT(PyRIIDModel):
         Raises:
             `ValueError` when no spectra are provided as input
         """
-        
+
         if source_ss.n_samples <= 0 or target_ss.n_samples <= 0:
-            raise ValueError("Empty spectra provided!")
+            raise ValueError("Empty spectr[a|um] provided!")
 
         if source_ss.spectra_type == SpectraType.Gross:
             self.model_inputs = (ModelInput.GrossSpectrum,)
@@ -94,8 +89,8 @@ class DeepJDOT(PyRIIDModel):
             self.model_inputs = (ModelInput.BackgroundSpectrum,)
         else:
             raise ValueError(f"{source_ss.spectra_type} is not supported in this model.")
-
-        ### Prepare training data
+                
+        # Preparing training data.
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
 
@@ -103,32 +98,31 @@ class DeepJDOT(PyRIIDModel):
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
 
-        # Make datasets
+        # Create datasets.
         source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
         source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
         target_dataset = tf.data.Dataset.from_tensor_slices(X_target)
         target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
 
-        # Define DeepJDOT model
+        # Define model.
         self.model = Model(
             inputs=self.feature_extractor.input,
             outputs=self.classifier(self.feature_extractor.output)
         )
         self.model.compile(loss=self.classification_loss)
 
-        # Update model information
+        # Update model information.
         self._update_info(
             target_level=target_level,
             model_outputs=model_outputs,
             normalization=source_ss.spectra_state,
         )
 
-        # Training loop
-        self.history = {"class_loss": [], "total_loss": [], "ot_loss": [], "val_ape_score": []}
+        # Training loop.
+        self.history = {"class_loss": [], "total_loss": [], "mmd_loss": [], "val_ape_score": []}
         best_val_ape = -np.inf
         best_weights = None
         t0 = time()
-
         for epoch in range(epochs):
             if verbose:
                 print(f"Epoch {epoch+1}/{epochs}")
@@ -136,21 +130,21 @@ class DeepJDOT(PyRIIDModel):
 
             total_loss_avg = tf.metrics.Mean()
             class_loss_avg = tf.metrics.Mean()
-            ot_loss_avg = tf.metrics.Mean()
+            mmd_loss_avg = tf.metrics.Mean()
 
             for (x_s, y_s), x_t in zip(source_dataset, target_dataset):
-                total_loss, class_loss, ot_loss = self.train_step(x_s, y_s, x_t)
+                total_loss, class_loss, mmd_val = self.train_step(x_s, y_s, x_t)
                 total_loss_avg.update_state(total_loss)
                 class_loss_avg.update_state(class_loss)
-                ot_loss_avg.update_state(ot_loss)
+                mmd_loss_avg.update_state(mmd_val)
 
             val_ape_score = self.calc_APE_score(validation_ss, target_level=target_level)
             self.history["class_loss"].append(float(class_loss_avg.result()))
             self.history["total_loss"].append(float(total_loss_avg.result()))
-            self.history["ot_loss"].append(float(ot_loss_avg.result()))
+            self.history["mmd_loss"].append(float(mmd_loss_avg.result()))
             self.history["val_ape_score"].append(val_ape_score)
 
-            # Save best model weights based on the validation APE score
+            # Save best model weights based on the validation APE score.
             if val_ape_score > best_val_ape:
                 best_val_ape = val_ape_score
                 best_weights = self.model.get_weights()
@@ -160,7 +154,7 @@ class DeepJDOT(PyRIIDModel):
                 print("  "
                       f"total_loss: {total_loss_avg.result():.4f} - "
                       f"class_loss: {class_loss_avg.result():.4f} - "
-                      f"ot_loss: {ot_loss_avg.result():.4f} - "
+                      f"mmd_loss: {mmd_loss_avg.result():.4f} - "
                       f"val_ape_score: {val_ape_score:.4f}")
 
         self.history["training_time"] = time() - t0
@@ -170,14 +164,9 @@ class DeepJDOT(PyRIIDModel):
         return self.history
 
     def predict(self, ss: SampleSet, bg_ss: SampleSet = None):
-        """Classify the spectra in the provided `SampleSet`(s).
+        """Classify the spectra in the provided SampleSet.
 
-        Results are stored inside the first SampleSet's prediction-related properties.
-
-        Args:
-            ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
-                foreground (AKA, "net") or gross
-            bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
+        Results are stored in the first SampleSet's prediction-related properties.
         """
         x_test = ss.get_samples().astype(float)
         if bg_ss:
@@ -200,7 +189,7 @@ class DeepJDOT(PyRIIDModel):
         ss.classified_by = self.model_id
 
     def calc_APE_score(self, ss: SampleSet, target_level="Isotope"):
-        """Calculate the prediction APE score on ss"""
+        """Calculate the prediction APE score on ss."""
         self.predict(ss)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
@@ -208,7 +197,7 @@ class DeepJDOT(PyRIIDModel):
         return ape
 
     def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope"):
-        """Calculate the prediction cosine similarity score on ss"""
+        """Calculate the prediction cosine similarity score on ss."""
         self.predict(ss)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
@@ -217,7 +206,7 @@ class DeepJDOT(PyRIIDModel):
         return cosine_score
 
     def calc_loss(self, ss: SampleSet, target_level="Isotope"):
-        """Calculate the loss on ss"""
+        """Calculate the loss on ss."""
         self.predict(ss)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
@@ -225,102 +214,45 @@ class DeepJDOT(PyRIIDModel):
         return loss
 
     @staticmethod
-    def pairwise_squared_distance(a, b):
+    def gaussian_kernel(x, y, sigma):
         """
-        Compute pairwise squared Euclidean distances between rows of tensors a and b.
-        
+        Compute the Gaussian kernel matrix between x and y.
         Args:
-            a: Tensor of shape (n, d).
-            b: Tensor of shape (m, d).
-            
+            x: Tensor of shape [n, d].
+            y: Tensor of shape [m, d].
+            sigma: Bandwidth of the Gaussian kernel.
         Returns:
-            Tensor of shape (n, m) containing squared distances.
+            A [n, m] kernel matrix.
         """
-        a_norm = tf.reduce_sum(tf.square(a), axis=1, keepdims=True)  # shape (n, 1)
-        b_norm = tf.reduce_sum(tf.square(b), axis=1, keepdims=True)  # shape (m, 1)
-        dist = a_norm + tf.transpose(b_norm) - 2 * tf.matmul(a, b, transpose_b=True)
-        return tf.maximum(dist, 0.0)
+        x_norm = tf.reduce_sum(tf.square(x), axis=1, keepdims=True)
+        y_norm = tf.reduce_sum(tf.square(y), axis=1, keepdims=True)
+        dist = x_norm - 2 * tf.matmul(x, y, transpose_b=True) + tf.transpose(y_norm)
+        return tf.exp(-dist / (2.0 * sigma**2))
 
     @staticmethod
-    def pairwise_classification_loss(y_true, y_pred):
+    def mmd_loss(source_features, target_features, sigma=1.0):
         """
-        Compute pairwise classification loss (categorical crossentropy) between y_true and y_pred.
-        y_true: Tensor of shape (n, num_classes)
-        y_pred: Tensor of shape (m, num_classes)
-        Returns: Tensor of shape (n, m)
+        Computes the Maximum Mean Discrepancy (MMD) loss between source and target features.
+        Both are [batch_size, feature_dim] Tensors.
         """
-        epsilon = 1e-8
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1.0)
-        # Expand dims to compute loss for every source-target pair.
-        y_true_exp = tf.expand_dims(y_true, axis=1)  # (n, 1, num_classes)
-        y_pred_exp = tf.expand_dims(y_pred, axis=0)  # (1, m, num_classes)
-        # Compute crossentropy: -sum(y_true * log(y_pred)) for each pair.
-        ce = -tf.reduce_sum(y_true_exp * tf.math.log(y_pred_exp), axis=-1)  # shape (n, m)
-        return ce
+        K_ss = MMD.gaussian_kernel(source_features, source_features, sigma)
+        K_tt = MMD.gaussian_kernel(target_features, target_features, sigma)
+        K_st = MMD.gaussian_kernel(source_features, target_features, sigma)
 
-    @staticmethod
-    def sinkhorn(a, b, M, reg, num_iters):
-        """
-        Compute the Sinkhorn algorithm for optimal transport.
-        a: Tensor of shape (n,), source distribution (sums to 1)
-        b: Tensor of shape (m,), target distribution (sums to 1)
-        M: Cost matrix of shape (n, m)
-        reg: Regularization parameter (epsilon)
-        num_iters: Number of Sinkhorn iterations
-        Returns: Optimal transport plan gamma of shape (n, m)
-        """
-        K = tf.exp(-M / reg)  # (n, m)
-        u = tf.ones_like(a)
-        v = tf.ones_like(b)
-
-        for _ in range(num_iters):
-            u = a / (tf.linalg.matvec(K, v) + 1e-8)
-            v = b / (tf.linalg.matvec(tf.transpose(K), u) + 1e-8)
-
-        gamma = tf.expand_dims(u, 1) * K * tf.expand_dims(v, 0)
-        return gamma
+        mmd = tf.reduce_mean(K_ss) + tf.reduce_mean(K_tt) - 2 * tf.reduce_mean(K_st)
+        return mmd
 
     @tf.function
     def train_step(self, x_s, y_s, x_t):
-        """
-        Perform one training step:
-          - Compute source features and predictions.
-          - Compute target features and predictions.
-          - Build a cost matrix that combines feature distances and a crossentropy term.
-          - Compute the OT plan via Sinkhorn iterations.
-          - Compute the OT loss and add it to the source classification loss.
-        """
         with tf.GradientTape() as tape:
-            # Forward pass on source
             f_s = self.feature_extractor(x_s, training=True)
-            p_s = self.classifier(f_s, training=True)
-            source_class_loss = self.classification_loss(y_s, p_s)
+            preds_s = self.classifier(f_s, training=True)
+            class_loss = self.classification_loss(y_s, preds_s)
 
-            # Forward pass on target
             f_t = self.feature_extractor(x_t, training=True)
-            p_t = self.classifier(f_t, training=True)
-
-            # Cost matrix: feature distance + classification loss term
-            feat_distance = self.pairwise_squared_distance(f_s, f_t)
-            cls_loss_matrix = self.pairwise_classification_loss(y_s, p_t)
-            cost_matrix = self.jdot_alpha * feat_distance + self.jdot_beta * cls_loss_matrix
-
-            # Define uniform marginals over the source and target batches
-            n = tf.cast(tf.shape(x_s)[0], tf.float32)
-            m = tf.cast(tf.shape(x_t)[0], tf.float32)
-            a = tf.fill([tf.shape(x_s)[0]], 1.0 / n)
-            b = tf.fill([tf.shape(x_t)[0]], 1.0 / m)
-
-            # Compute the OT coupling using Sinkhorn iterations
-            gamma = self.sinkhorn(a, b, cost_matrix, self.sinkhorn_reg, self.num_sinkhorn_iters)
-
-            # OT loss is the inner product between the coupling and cost matrix
-            ot_loss = tf.reduce_sum(gamma * cost_matrix)
-
-            # Total loss: source classification loss + weighted OT loss
-            total_loss = source_class_loss + self.ot_weight * ot_loss
+            mmd_val = self.mmd_loss(f_s, f_t, self.sigma)
+            total_loss = class_loss + self.lmbda * mmd_val
 
         grads = tape.gradient(total_loss, self.source_model.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.source_model.trainable_variables))
-        return total_loss, source_class_loss, ot_loss
-        
+        return total_loss, class_loss, mmd_val

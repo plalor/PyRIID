@@ -12,8 +12,8 @@ from riid.metrics import APE_score
 from time import perf_counter as time
 
 
-class CORAL(PyRIIDModel):
-    """Classifier using CORAL domain adaptation."""
+class DeepCORAL(PyRIIDModel):
+    """Classifier using DeepCORAL domain adaptation."""
     def __init__(self, optimizer=None, source_model=None, lmbda=1):
         """
         Args:
@@ -45,7 +45,7 @@ class CORAL(PyRIIDModel):
             classifier_output = all_layers[-1](classifier_input)
             self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
         else:
-            raise ValueError("A pretrained source model must be provided")
+            print("WARNING: no pretrained source model was provided")
 
         if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)

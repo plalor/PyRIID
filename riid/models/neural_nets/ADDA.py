@@ -57,7 +57,7 @@ class ADDA(PyRIIDModel):
             self.target_encoder.build(self.source_encoder.input_shape)
             self.target_encoder.set_weights(self.source_encoder.get_weights())
         else:
-            raise ValueError("A pretrained source model must be provided")
+            print("WARNING: no pretrained source model was provided")
             
         if self.activation is None:
             self.activation = "relu"

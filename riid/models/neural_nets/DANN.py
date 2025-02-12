@@ -52,7 +52,7 @@ class DANN(PyRIIDModel):
             classifier_output = all_layers[-1](classifier_input)
             self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
         else:
-            raise ValueError("A pretrained source model must be provided")
+            print("WARNING: no pretrained source model was provided")
             
         if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
