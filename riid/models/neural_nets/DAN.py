@@ -12,7 +12,7 @@ from riid.metrics import APE_score
 from time import perf_counter as time
 
 
-class MMD(PyRIIDModel):
+class DAN(PyRIIDModel):
     """Classifier using Deep Adaptation Networks (DAN) for domain adaptation via 
     Maximum Mean Discrepancy  (MMD)."""
     def __init__(self, optimizer=None, source_model=None, lmbda=1, sigma=1.0):
@@ -235,9 +235,9 @@ class MMD(PyRIIDModel):
         Computes the Maximum Mean Discrepancy (MMD) loss between source and target features.
         Both are [batch_size, feature_dim] Tensors.
         """
-        K_ss = MMD.gaussian_kernel(source_features, source_features, sigma)
-        K_tt = MMD.gaussian_kernel(target_features, target_features, sigma)
-        K_st = MMD.gaussian_kernel(source_features, target_features, sigma)
+        K_ss = DAN.gaussian_kernel(source_features, source_features, sigma)
+        K_tt = DAN.gaussian_kernel(target_features, target_features, sigma)
+        K_st = DAN.gaussian_kernel(source_features, target_features, sigma)
 
         mmd = tf.reduce_mean(K_ss) + tf.reduce_mean(K_tt) - 2 * tf.reduce_mean(K_st)
         return mmd
