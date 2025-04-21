@@ -187,7 +187,7 @@ class Transformer(PyRIIDModel):
 
         return history
 
-    def predict(self, ss: SampleSet, bg_ss: SampleSet = None):
+    def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
         """Classify the spectra in the provided `SampleSet`(s).
 
         Results are stored inside the first SampleSet's prediction-related properties.
@@ -196,6 +196,7 @@ class Transformer(PyRIIDModel):
             ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
                 foreground (AKA, "net") or gross
             bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
+            batch_size: batch size during call to self.model.predict
         """
         x_test = ss.get_samples().astype(float)
         if bg_ss:
@@ -203,7 +204,7 @@ class Transformer(PyRIIDModel):
         else:
             X = x_test
 
-        results = self.model.predict(X, batch_size=1000)
+        results = self.model.predict(X, batch_size=batch_size)
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]
@@ -217,26 +218,26 @@ class Transformer(PyRIIDModel):
 
         ss.classified_by = self.model_id
 
-    def calc_APE_score(self, ss: SampleSet, target_level="Isotope"):
+    def calc_APE_score(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
         """Calculate the prediction APE score on ss"""
-        self.predict(ss)
+        self.predict(ss, batch_size=batch_size)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
         ape = APE_score(y_true, y_pred).numpy()
         return ape
 
-    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope"):
+    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
         """Calculate the prediction cosine similarity score on ss"""
-        self.predict(ss)
+        self.predict(ss, batch_size=batch_size)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
         cosine_sim = cosine_similarity(y_true, y_pred)
         cosine_score = -tf.reduce_mean(cosine_sim).numpy()
         return cosine_score
 
-    def calc_loss(self, ss: SampleSet, target_level="Isotope"):
+    def calc_loss(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
         """Calculate the loss on ss"""
-        self.predict(ss)
+        self.predict(ss, batch_size=batch_size)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
         loss = self.model.loss(y_true, y_pred).numpy()

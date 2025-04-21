@@ -1,14 +1,13 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.layers import Dense, Input, Dropout, InputLayer
 from tensorflow.keras.losses import BinaryCrossentropy, cosine_similarity
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.metrics import APE_score
 from time import perf_counter as time
 
 
@@ -36,11 +35,20 @@ class ADDA(PyRIIDModel):
             self.classification_loss = source_model.loss
 
             # Remove dropout layers for stability
-            config = source_model.get_config()
-            filtered_layers = [layer for layer in config["layers"] if layer["class_name"] != "Dropout"]
-            config["layers"] = filtered_layers
-            self.source_model = Model.from_config(config)
-            self.source_model.set_weights(source_model.get_weights())
+            inputs = source_model.inputs[0]
+            x = inputs
+            
+            for layer in source_model.layers:
+                if isinstance(layer, (InputLayer, Dropout)):
+                    continue
+                x = layer(x)
+            
+            self.source_model = Model(inputs=inputs, outputs=x)
+            self.source_model.compile(
+                optimizer=source_model.optimizer,
+                loss=source_model.loss,
+                metrics=source_model.metrics
+            )
 
             all_layers = self.source_model.layers
             encoder_input = self.source_model.input
@@ -105,19 +113,36 @@ class ADDA(PyRIIDModel):
             raise ValueError(f"{source_ss.spectra_type} is not supported in this model.")
 
         ### Preparing training data
-        X_source = source_ss.get_samples()
-        X_target = target_ss.get_samples()
+        X_source = source_ss.get_samples().astype("float32")
+        X_target = target_ss.get_samples().astype("float32")
+
+        X_validation = validation_ss.get_samples().astype("float32")
+        Y_validation = validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
 
         # Domain labels: 0 for source, 1 for target
         Y_source = np.zeros(len(X_source)).reshape(-1, 1)
         Y_target = np.ones(len(X_target)).reshape(-1, 1)
 
         # Make datasets
+        n_s = len(X_source) // batch_size
+        n_t = len(X_target) // batch_size
+        
         source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
-        source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
         target_dataset = tf.data.Dataset.from_tensor_slices((X_target, Y_target))
-        target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
-                  
+
+        if n_s < n_t:
+            source_dataset = source_dataset.repeat().shuffle(len(X_source)).batch(batch_size)
+            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
+        elif n_t < n_s:
+            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
+            target_dataset = target_dataset.repeat().shuffle(len(X_target)).batch(batch_size)
+        else:
+            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
+            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
+
+        validation_dataset = tf.data.Dataset.from_tensor_slices((X_validation, Y_validation))
+        validation_dataset = validation_dataset.batch(batch_size)
+
         ### Build discriminator
         if not self.discriminator:
             input_shape = self.source_encoder.output_shape[1]
@@ -133,7 +158,7 @@ class ADDA(PyRIIDModel):
             inputs=self.target_encoder.input,
             outputs=self.source_classifier(self.target_encoder.output)
         )
-        self.model.compile(loss = self.classification_loss)
+        self.model.compile(loss=self.classification_loss, optimizer=self.t_optimizer)
 
         self._update_info(
             target_level=target_level,
@@ -142,8 +167,9 @@ class ADDA(PyRIIDModel):
         )
 
         # Training loop
-        self.history = {"d_loss": [], "t_loss": [], "val_ape_score": []}
-        best_val_ape = -np.inf
+        self.history = {"d_loss": [], "t_loss": [], "val_loss": []}
+
+        best_val = np.inf
         best_weights = None
         t0 = time()
         for epoch in range(epochs):
@@ -155,19 +181,20 @@ class ADDA(PyRIIDModel):
                 d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
                 t_loss = self.train_target_encoder_step(x_t)
 
-            val_ape_score = self.calc_APE_score(validation_ss, target_level=target_level)
+            val_loss = self.model.evaluate(validation_dataset, verbose=0)
+
             self.history["d_loss"].append(float(d_loss))
             self.history["t_loss"].append(float(t_loss))
-            self.history["val_ape_score"].append(val_ape_score)
+            self.history["val_loss"].append(float(val_loss))
 
             # Save best model weights based on the validation APE score
-            if val_ape_score > best_val_ape:
-                best_val_ape = val_ape_score
+            if val_loss < best_val:
+                best_val = val_loss
                 best_weights = self.model.get_weights()
 
             if verbose:
                 print(f"Finished in {time()-t1:.0f} seconds")
-                print(f"  d_loss: {d_loss:.4f} - t_loss: {t_loss:.4f} - val_ape_score: {val_ape_score:.4f}")
+                print(f"  d_loss: {d_loss:.4f} - t_loss: {t_loss:.4f} - val_loss: {val_loss:.4f}")
 
         self.history["training_time"] = time() - t0
         if best_weights is not None:
@@ -175,7 +202,7 @@ class ADDA(PyRIIDModel):
 
         return self.history
 
-    def predict(self, ss: SampleSet, bg_ss: SampleSet = None):
+    def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
         """Classify the spectra in the provided `SampleSet`(s).
 
         Results are stored inside the first SampleSet's prediction-related properties.
@@ -184,6 +211,7 @@ class ADDA(PyRIIDModel):
             ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
                 foreground (AKA, "net") or gross
             bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
+            batch_size: batch size during call to self.model.predict
         """
         x_test = ss.get_samples().astype(float)
         if bg_ss:
@@ -191,7 +219,7 @@ class ADDA(PyRIIDModel):
         else:
             X = x_test
 
-        results = self.model.predict(X, batch_size=1000)
+        results = self.model.predict(X, batch_size=batch_size)
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]
@@ -205,26 +233,26 @@ class ADDA(PyRIIDModel):
 
         ss.classified_by = self.model_id
 
-    def calc_APE_score(self, ss: SampleSet, target_level="Isotope"):
+    def calc_APE_score(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
         """Calculate the prediction APE score on ss"""
-        self.predict(ss)
+        self.predict(ss, batch_size=batch_size)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
         ape = APE_score(y_true, y_pred).numpy()
         return ape
 
-    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope"):
+    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
         """Calculate the prediction cosine similarity score on ss"""
-        self.predict(ss)
+        self.predict(ss, batch_size=batch_size)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
         cosine_sim = cosine_similarity(y_true, y_pred)
         cosine_score = -tf.reduce_mean(cosine_sim).numpy()
         return cosine_score
 
-    def calc_loss(self, ss: SampleSet, target_level="Isotope"):
+    def calc_loss(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
         """Calculate the loss on ss"""
-        self.predict(ss)
+        self.predict(ss, batch_size=batch_size)
         y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
         loss = self.model.loss(y_true, y_pred).numpy()
