@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Input, Dropout, InputLayer
+from tensorflow.keras.layers import Dense, Input, Dropout, Activation
 from tensorflow.keras.losses import BinaryCrossentropy, cosine_similarity
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
@@ -35,15 +35,17 @@ class ADDA(PyRIIDModel):
             self.classification_loss = source_model.loss
 
             # Remove dropout layers for stability
-            inputs = source_model.inputs[0]
-            x = inputs
+            def strip_dropout(layer):
+                if isinstance(layer, Dropout):
+                    return Activation('linear', name=layer.name)
+                return layer.__class__.from_config(layer.get_config())
             
-            for layer in source_model.layers:
-                if isinstance(layer, (InputLayer, Dropout)):
-                    continue
-                x = layer(x)
-            
-            self.source_model = Model(inputs=inputs, outputs=x)
+            self.source_model = clone_model(
+                source_model,
+                clone_function=strip_dropout
+            )
+            self.source_model.build(source_model.input_shape)
+            self.source_model.set_weights(source_model.get_weights())
             self.source_model.compile(
                 optimizer=source_model.optimizer,
                 loss=source_model.loss,
