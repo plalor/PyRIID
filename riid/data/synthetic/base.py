@@ -18,7 +18,7 @@ class Synthesizer():
     """Base class for synthesizers."""
 
     SYNTHETIC_STR = "synthetic"
-    SUPPORTED_SAMPLING_FUNCTIONS = ["uniform", "log10", "discrete", "list", "gamma", "gaussian"]
+    SUPPORTED_SAMPLING_FUNCTIONS = ["uniform", "log10", "discrete", "list", "exponential", "gamma", "gaussian"]
 
     def __init__(self, bg_cps: float = 300.0, long_bg_live_time: float = 120.0,
                  apply_poisson_noise: bool = True,
@@ -237,6 +237,8 @@ def get_distribution_values(function: str, function_args: Any, n_values: int,
         values = rng.choice(function_args, size=n_values)
     elif function == "list":
         values = np.array(function_args)
+    elif function == "exponential":
+        values = rng.exponential(scale=function_args, size=n_values)
     elif function == "gamma":
         shape, scale = function_args
         values = rng.gamma(shape=shape, scale=scale, size=n_values)

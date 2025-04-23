@@ -45,11 +45,13 @@ class StaticSynthesizer(Synthesizer):
             samples_per_seed: number of synthetic samples to generate
                 per source-background seed pair
             live_time_function: string that names the method of sampling
-                for target live time values (options: uniform, log10, discrete, list, gamma, gaussian)
+                for target live time values (options: uniform, log10, discrete, list,
+                                                      exponential, gamma, gaussian)
             live_time_function_args: range of values which are sampled in the
                 fashion specified by the `live_time_function` argument
             snr_function: string that names the method of sampling for target
-                signal-to-noise ratio values (options: uniform, log10, discrete, list, gamma, gaussian)
+                signal-to-noise ratio values (options: uniform, log10, discrete, list,
+                                                       exponential, gamma, gaussian)
             snr_function_args: range of values which are sampled in the fashion
                 specified by the `snr_function` argument
         """
