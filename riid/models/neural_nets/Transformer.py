@@ -62,7 +62,7 @@ class Transformer(PyRIIDModel):
         if self.optimizer is None:
             self.optimizer = Adam(learning_rate=0.001)
         if self.metrics is None:
-            self.metrics = [APE_score]
+            self.metrics = [CategoricalCrossentropy()]
         if self.activity_regularizer is None:
             self.activity_regularizer = l1(0.0)
         if self.final_activation is None:
@@ -71,8 +71,8 @@ class Transformer(PyRIIDModel):
         self.model = None
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size: int = 200,
-            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_ape_score",
-            es_mode: str = "max", es_verbose=0, target_level="Isotope", verbose: bool = False):
+            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_categorical_crossentropy",
+            es_mode: str = "min", es_verbose=0, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -242,3 +242,12 @@ class Transformer(PyRIIDModel):
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
         loss = self.model.loss(y_true, y_pred).numpy()
         return loss
+
+    def calc_accuracy(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
+        """Calculate the accuracy on ss"""
+        from sklearn.metrics import accuracy_score
+        self.predict(ss, batch_size=batch_size)
+        labels = ss.get_labels()
+        predictions = ss.get_predictions()
+        accuracy = accuracy_score(labels, predictions)
+        return accuracy
