@@ -136,8 +136,8 @@ class ADDA(PyRIIDModel):
 
         # Build sigma_list
         if self.base_sigma is None:
-            feats_s = self.source_encoder.predict(X_source, batch_size=batch_size)
-            feats_t = self.source_encoder.predict(X_target, batch_size=batch_size)
+            feats_s = self.source_encoder.predict(X_source[:1000], batch_size=batch_size)
+            feats_t = self.source_encoder.predict(X_target[:1000], batch_size=batch_size)
             feats = np.vstack([feats_s, feats_t])
             dists = pairwise_distances(feats, metric="euclidean")
             self.base_sigma = float(np.median(dists))
