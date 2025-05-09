@@ -15,8 +15,7 @@ from time import perf_counter as time
 class ADDA(PyRIIDModel):
     """Adversarial Discriminative Domain Adaptation classifier"""            
     def __init__(self, activation=None, d_optimizer=None, t_optimizer=None, warmup_optimizer = None,
-                 source_model=None, discriminator_hidden_layers=None, sigma=None,
-                 kernel_num=7, kernel_mul=np.sqrt(2)):
+                 source_model=None, discriminator_hidden_layers=None):
         """
         Args:
             activation: activation function to use for discriminator dense layer
@@ -134,22 +133,6 @@ class ADDA(PyRIIDModel):
         X_src_val = source_val_ss.get_samples().astype("float32")
         X_tgt_val = target_val_ss.get_samples().astype("float32")
 
-        # Build sigma_list
-        if self.base_sigma is None:
-            feats_s = self.source_encoder.predict(X_source[:1000], batch_size=batch_size)
-            feats_t = self.source_encoder.predict(X_target[:1000], batch_size=batch_size)
-            feats = np.vstack([feats_s, feats_t])
-            dists = pairwise_distances(feats, metric="euclidean")
-            self.base_sigma = float(np.median(dists))
-            if verbose:
-                print(f"  [MMD] median heuristic σ = {self.base_sigma:.4g}")
-
-        center = self.kernel_num // 2
-        self.sigma_list = [
-            self.base_sigma * (self.kernel_mul ** (i - center))
-            for i in range(self.kernel_num)
-        ]
-
         ### Isotopic labels
         isotope_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
         isotope_tgt_val = target_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
@@ -235,7 +218,7 @@ class ADDA(PyRIIDModel):
 
         # Training loop
         self.history = {"d_loss": [], "t_loss": [], "src_val_loss": [], "tgt_val_loss": [],
-                        "d_val_loss": [], "mmd": [], "coral": [], "entropy": []}
+                        "d_val_loss": [], "coral": [], "entropy": []}
 
         best_val = np.inf
         best_weights = None
@@ -257,7 +240,6 @@ class ADDA(PyRIIDModel):
             
             f_s_val = self.source_encoder.predict(X_src_val, batch_size=batch_size)
             f_t_val = self.target_encoder.predict(X_tgt_val, batch_size=batch_size)
-            mmd = self.mmd_loss(f_s_val, f_t_val)
             coral = self.coral_loss(f_s_val, f_t_val)
 
             f_s = tf.concat([f_s_val, f_t_val], axis=0)
@@ -272,7 +254,6 @@ class ADDA(PyRIIDModel):
             self.history["src_val_loss"].append(src_val_loss)
             self.history["tgt_val_loss"].append(tgt_val_loss)
             self.history["d_val_loss"].append(d_val_loss)
-            self.history["mmd"].append(mmd)
             self.history["coral"].append(coral)
             self.history["entropy"].append(entropy_tgt)
         
@@ -322,38 +303,6 @@ class ADDA(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
-
-    @staticmethod
-    def gaussian_kernel(x, y, sigma):
-        """
-        Compute the Gaussian kernel matrix between x and y.
-        Args:
-            x: Tensor of shape [n, d].
-            y: Tensor of shape [m, d].
-            sigma: Bandwidth of the Gaussian kernel.
-        Returns:
-            A [n, m] kernel matrix.
-        """
-        x_norm = tf.reduce_sum(tf.square(x), axis=1, keepdims=True)
-        y_norm = tf.reduce_sum(tf.square(y), axis=1, keepdims=True)
-        dist = x_norm - 2 * tf.matmul(x, y, transpose_b=True) + tf.transpose(y_norm)
-        return tf.exp(-dist / (2.0 * sigma**2))
-
-    def mmd_loss(self, source_features, target_features):
-        """
-        Multi-kernel MMD: average over RBFs with bandwidths in self.sigma_list
-        """
-        mmd_total = 0.0
-        for sigma in self.sigma_list:
-            K_ss = ADDA.gaussian_kernel(source_features, source_features, sigma)
-            K_tt = ADDA.gaussian_kernel(target_features, target_features, sigma)
-            K_st = ADDA.gaussian_kernel(source_features, target_features, sigma)
-            mmd_total += (
-                tf.reduce_mean(K_ss)
-              + tf.reduce_mean(K_tt)
-              - 2.0 * tf.reduce_mean(K_st)
-            )
-        return mmd_total / float(len(self.sigma_list))
 
     @staticmethod
     def coral_loss(source_features, target_features):
