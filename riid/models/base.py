@@ -12,8 +12,9 @@ from enum import Enum
 import numpy as np
 import tensorflow as tf
 import tf2onnx
-from keras.api.models import Model
-from keras.api.utils import get_custom_objects
+from tensorflow.keras.models import Model
+from tensorflow.keras.utils import get_custom_objects
+from tensorflow.keras.losses import cosine_similarity
 
 import riid
 from riid import SampleSet, SpectraState
@@ -21,6 +22,7 @@ from riid.data.labeling import label_to_index_element
 from riid.losses import mish
 from riid.losses.sparsemax import sparsemax
 from riid.metrics import multi_f1, single_f1, APE_score
+from sklearn.metrics import accuracy_score
 
 get_custom_objects().update({
     "multi_f1": multi_f1,
@@ -247,6 +249,39 @@ class PyRIIDModel:
     @abstractmethod
     def predict(self):
         pass
+
+    def calc_APE_score(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
+        """Calculate the prediction APE score on ss"""
+        self.predict(ss, batch_size=batch_size)
+        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
+        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
+        ape = APE_score(y_true, y_pred).numpy()
+        return ape
+
+    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
+        """Calculate the prediction cosine similarity score on ss"""
+        self.predict(ss, batch_size=batch_size)
+        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
+        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
+        cosine_sim = cosine_similarity(y_true, y_pred)
+        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
+        return cosine_score
+
+    def calc_loss(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
+        """Calculate the loss on ss"""
+        self.predict(ss, batch_size=batch_size)
+        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
+        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
+        loss = self.model.loss(y_true, y_pred).numpy()
+        return loss
+
+    def calc_accuracy(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
+        """Calculate the accuracy on ss"""
+        self.predict(ss, batch_size=batch_size)
+        labels = ss.get_labels()
+        predictions = ss.get_predictions()
+        accuracy = accuracy_score(labels, predictions)
+        return accuracy
 
 
 class PyRIIDModelJsonEncoder(json.JSONEncoder):

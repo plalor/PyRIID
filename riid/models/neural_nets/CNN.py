@@ -4,14 +4,13 @@ import tensorflow as tf
 from keras.utils import Sequence
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten
-from tensorflow.keras.losses import CategoricalCrossentropy, cosine_similarity
+from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l1, l2
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.metrics import APE_score
 from time import perf_counter as time
 
 
@@ -20,7 +19,7 @@ class CNN(PyRIIDModel):
     def __init__(self, activation=None, loss=None, optimizer=None,
                  metrics=None, l2_alpha: float = 1e-4,
                  activity_regularizer=None, final_activation=None,
-                 hidden_layers=None, dense_layer_size=None, dropout=0):
+                 convolutional_layers=None, dense_layer_sizes=None, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -30,8 +29,8 @@ class CNN(PyRIIDModel):
             l2_alpha: alpha value for the L2 regularization of each dense layer
             activity_regularizer: regularizer function applied each dense layer output
             final_activation: final activation function to apply to model output
-            hidden_layers: (filter, kernel_size) of each hidden laye of the CNN
-            dense_layer_size: size of the final dense layer after the convolutional layers
+            convolutional_layers: (filter, kernel_size) of each conv layer of the CNN
+            dense_layer_sizes: sizes of the final dense layers after the convolutional layers
             dropout: optional droupout layer after each hidden layer
         """
         super().__init__()
@@ -44,8 +43,8 @@ class CNN(PyRIIDModel):
         self.activity_regularizer = activity_regularizer
         self.final_activation = final_activation
 
-        self.hidden_layers = hidden_layers
-        self.dense_layer_size = dense_layer_size
+        self.convolutional_layers = convolutional_layers
+        self.dense_layer_sizes = dense_layer_sizes
         self.dropout = dropout
 
         if self.activation is None:
@@ -119,7 +118,7 @@ class CNN(PyRIIDModel):
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,1), name="Spectrum")
             x = inputs
-            for layer, (filters, kernel_size) in enumerate(self.hidden_layers):
+            for layer, (filters, kernel_size) in enumerate(self.convolutional_layers):
                 x = Conv1D(
                     filters=filters,
                     kernel_size=kernel_size,
@@ -134,7 +133,8 @@ class CNN(PyRIIDModel):
                     x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
 
             x = Flatten(name="flatten")(x)
-            x = Dense(self.dense_layer_size, activation=self.activation, name="dense_layer")(x)
+            for layer, nodes in enumerate(self.dense_layer_sizes):
+                x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
             if self.dropout > 0:
                 x = Dropout(self.dropout, name="dropout_layer")(x)
             outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
@@ -204,37 +204,3 @@ class CNN(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
-
-    def calc_APE_score(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction APE score on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        ape = APE_score(y_true, y_pred).numpy()
-        return ape
-
-    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction cosine similarity score on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        cosine_sim = cosine_similarity(y_true, y_pred)
-        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
-        return cosine_score
-
-    def calc_loss(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the loss on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values        
-        loss = self.model.loss(y_true, y_pred).numpy()
-        return loss
-
-    def calc_accuracy(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the accuracy on ss"""
-        from sklearn.metrics import accuracy_score
-        self.predict(ss, batch_size=batch_size)
-        labels = ss.get_labels()
-        predictions = ss.get_predictions()
-        accuracy = accuracy_score(labels, predictions)
-        return accuracy

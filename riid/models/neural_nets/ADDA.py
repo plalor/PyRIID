@@ -2,34 +2,42 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Input, Dropout, Activation
-from tensorflow.keras.losses import BinaryCrossentropy, cosine_similarity
+from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
+from sklearn.metrics import accuracy_score, pairwise_distances
 from time import perf_counter as time
 
 
 class ADDA(PyRIIDModel):
     """Adversarial Discriminative Domain Adaptation classifier"""            
-    def __init__(self, activation=None, d_optimizer=None, t_optimizer=None,
-                 source_model=None, dense_layer_size=0):
+    def __init__(self, activation=None, d_optimizer=None, t_optimizer=None, warmup_optimizer = None,
+                 source_model=None, discriminator_hidden_layers=None, sigma=None,
+                 kernel_num=7, kernel_mul=np.sqrt(2)):
         """
         Args:
             activation: activation function to use for discriminator dense layer
             d_optimizer: tensorflow optimizer or optimizer name to use for training discriminator
             t_optimizer: tensorflow optimizer or optimizer name to use for training target encoder
+            warmup_optimizer: tensorflow optimizer for pretraining discriminator
             source_model: pretrained source model
-            dense_layer_size: size of the dense layer in the discriminator
+            discriminator_hidden_layers: size of the dense layer(s) in the discriminator
         """
         super().__init__()
 
         self.activation = activation
         self.d_optimizer = d_optimizer
         self.t_optimizer = t_optimizer
-        self.dense_layer_size = dense_layer_size
+        self.warmup_optimizer = warmup_optimizer
+        self.discriminator_hidden_layers = discriminator_hidden_layers
         self.discriminator_loss = BinaryCrossentropy()
+
+        self.base_sigma = sigma
+        self.kernel_num = kernel_num
+        self.kernel_mul = kernel_mul
 
         if source_model is not None:
             self.classification_loss = source_model.loss
@@ -75,12 +83,14 @@ class ADDA(PyRIIDModel):
             self.d_optimizer = Adam(learning_rate=0.001)
         if self.t_optimizer is None:
             self.t_optimizer = Adam(learning_rate=0.001)
+        if self.warmup_optimizer is None:
+            self.warmup_optimizer = Adam(learning_rate=0.001)
 
         self.discriminator = None
         self.model = None
 
-    def fit(self, source_ss: SampleSet, target_ss: SampleSet, validation_ss: SampleSet,
-            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
+    def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
+            warmup_epochs: int = 10, batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -88,8 +98,11 @@ class ADDA(PyRIIDModel):
                 and the spectra are either foreground (AKA, "net") or gross.
             target_ss: `SampleSet` of `n` training spectra from the target domain where `n` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
-            validation_ss: `SampleSet` of `m` validation spectra from the target domain where 
+            source_val_ss: `SampleSet` of `m` validation spectra from the source domain where 
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
+            target_val_ss: `SampleSet` of `m` validation spectra from the target domain where 
+                `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
+            warmup_epochs: number of epochs to pretrain the discriminator
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
             target_level: `SampleSet.sources` column level to use
@@ -118,19 +131,42 @@ class ADDA(PyRIIDModel):
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
 
-        X_validation = validation_ss.get_samples().astype("float32")
-        Y_validation = validation_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+        X_src_val = source_val_ss.get_samples().astype("float32")
+        X_tgt_val = target_val_ss.get_samples().astype("float32")
+
+        # Build sigma_list
+        if self.base_sigma is None:
+            feats_s = self.source_encoder.predict(X_source, batch_size=batch_size)
+            feats_t = self.source_encoder.predict(X_target, batch_size=batch_size)
+            feats = np.vstack([feats_s, feats_t])
+            dists = pairwise_distances(feats, metric="euclidean")
+            self.base_sigma = float(np.median(dists))
+            if verbose:
+                print(f"  [MMD] median heuristic σ = {self.base_sigma:.4g}")
+
+        center = self.kernel_num // 2
+        self.sigma_list = [
+            self.base_sigma * (self.kernel_mul ** (i - center))
+            for i in range(self.kernel_num)
+        ]
+
+        ### Isotopic labels
+        isotope_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+        isotope_tgt_val = target_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
 
         # Domain labels: 0 for source, 1 for target
-        Y_source = np.zeros(len(X_source)).reshape(-1, 1)
-        Y_target = np.ones(len(X_target)).reshape(-1, 1)
+        domain_source = np.zeros(len(X_source)).reshape(-1, 1)
+        domain_target = np.ones(len(X_target)).reshape(-1, 1)
+        domain_src_val = np.zeros(len(X_src_val)).reshape(-1, 1)
+        domain_tgt_val = np.ones(len(X_tgt_val)).reshape(-1, 1)
+        domain_val = tf.concat([domain_src_val, domain_tgt_val], axis=0)
 
         # Make datasets
         n_s = len(X_source) // batch_size
         n_t = len(X_target) // batch_size
         
-        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
-        target_dataset = tf.data.Dataset.from_tensor_slices((X_target, Y_target))
+        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, domain_source))
+        target_dataset = tf.data.Dataset.from_tensor_slices((X_target, domain_target))
 
         if n_s < n_t:
             source_dataset = source_dataset.repeat().shuffle(len(X_source)).batch(batch_size)
@@ -142,16 +178,13 @@ class ADDA(PyRIIDModel):
             source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
             target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
 
-        validation_dataset = tf.data.Dataset.from_tensor_slices((X_validation, Y_validation))
-        validation_dataset = validation_dataset.batch(batch_size)
-
         ### Build discriminator
         if not self.discriminator:
             input_shape = self.source_encoder.output_shape[1]
             inputs = Input(shape=(input_shape,), name="features")
             x = inputs
-            if self.dense_layer_size > 0:
-                x = Dense(self.dense_layer_size, activation=self.activation)(x)
+            for layer, nodes in enumerate(self.discriminator_hidden_layers):
+                x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
             output = Dense(1, activation="sigmoid", name="discriminator")(x)
             self.discriminator = Model(inputs, output)
 
@@ -168,8 +201,41 @@ class ADDA(PyRIIDModel):
             normalization=source_ss.spectra_state,
         )
 
+        # Warmup the discriminator
+        if warmup_epochs > 0:
+            if verbose:
+                print("Warming up discriminator:")
+            d_optimizer = self.d_optimizer # save for later
+            self.d_optimizer = self.warmup_optimizer # use this optimizer for warming up
+            for epoch in range(warmup_epochs):
+                if verbose:
+                    print(f"Epoch {epoch+1}/{warmup_epochs}")
+                    t1 = time()
+    
+                for (x_s, y_s), (x_t, y_t) in zip(source_dataset, target_dataset):
+                    d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
+    
+                f_s = self.source_encoder(X_src_val, training=False)
+                f_t = self.target_encoder(X_tgt_val, training=False)
+        
+                pred_s = self.discriminator(f_s, training=False)
+                pred_t = self.discriminator(f_t, training=False)
+    
+                domain_preds_s = np.round(pred_s).astype(int).flatten()
+                domain_preds_t = np.round(pred_t).astype(int).flatten()
+                
+                domain_acc_s = accuracy_score(domain_src_val, domain_preds_s)
+                domain_acc_t = accuracy_score(domain_tgt_val, domain_preds_t)
+    
+                if verbose:
+                    print(f"Finished in {time()-t1:.0f} seconds")
+                    print(f"  d_loss: {d_loss:.4f} - domain_acc_s: {domain_acc_s:.4f} - domain_acc_t: {domain_acc_t:.4f}")
+                    
+            self.d_optimizer = d_optimizer # restore d_optimizer for training loop
+
         # Training loop
-        self.history = {"d_loss": [], "t_loss": [], "val_loss": []}
+        self.history = {"d_loss": [], "t_loss": [], "src_val_loss": [], "tgt_val_loss": [],
+                        "d_val_loss": [], "mmd": [], "coral": [], "entropy": []}
 
         best_val = np.inf
         best_weights = None
@@ -183,20 +249,42 @@ class ADDA(PyRIIDModel):
                 d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
                 t_loss = self.train_target_encoder_step(x_t)
 
-            val_loss = self.model.evaluate(validation_dataset, verbose=0)
+            Y_src_pred = self.model.predict(X_src_val, batch_size=batch_size)
+            src_val_loss = self.model.loss(isotope_src_val, Y_src_pred).numpy()
+            
+            Y_tgt_pred = self.model.predict(X_tgt_val, batch_size=batch_size)
+            tgt_val_loss = self.model.loss(isotope_tgt_val, Y_tgt_pred).numpy()
+            
+            f_s_val = self.source_encoder.predict(X_src_val, batch_size=batch_size)
+            f_t_val = self.target_encoder.predict(X_tgt_val, batch_size=batch_size)
+            mmd = self.mmd_loss(f_s_val, f_t_val)
+            coral = self.coral_loss(f_s_val, f_t_val)
+
+            f_s = tf.concat([f_s_val, f_t_val], axis=0)
+            pred = self.discriminator(f_s, training=False)
+            d_val_loss = self.discriminator_loss(domain_val, pred)
+
+            H = -np.sum(Y_tgt_pred * np.log(Y_tgt_pred + 1e-8), axis=1)
+            entropy_tgt = H.mean()
 
             self.history["d_loss"].append(float(d_loss))
             self.history["t_loss"].append(float(t_loss))
-            self.history["val_loss"].append(float(val_loss))
-
-            # Save best model weights based on the validation APE score
-            if val_loss < best_val:
-                best_val = val_loss
+            self.history["src_val_loss"].append(src_val_loss)
+            self.history["tgt_val_loss"].append(tgt_val_loss)
+            self.history["d_val_loss"].append(d_val_loss)
+            self.history["mmd"].append(mmd)
+            self.history["coral"].append(coral)
+            self.history["entropy"].append(entropy_tgt)
+        
+            # save best model weights based on validation score
+            if tgt_val_loss < best_val:
+                best_val = tgt_val_loss
                 best_weights = self.model.get_weights()
 
             if verbose:
                 print(f"Finished in {time()-t1:.0f} seconds")
-                print(f"  d_loss: {d_loss:.4f} - t_loss: {t_loss:.4f} - val_loss: {val_loss:.4f}")
+                print(f"  d_loss: {d_loss:.4f} - t_loss: {t_loss:.4f} - src_val_loss: {src_val_loss:.4f} "
+                      f"- tgt_val_loss: {tgt_val_loss:.4f}")
 
         self.history["training_time"] = time() - t0
         if best_weights is not None:
@@ -235,30 +323,53 @@ class ADDA(PyRIIDModel):
 
         ss.classified_by = self.model_id
 
-    def calc_APE_score(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction APE score on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        ape = APE_score(y_true, y_pred).numpy()
-        return ape
+    @staticmethod
+    def gaussian_kernel(x, y, sigma):
+        """
+        Compute the Gaussian kernel matrix between x and y.
+        Args:
+            x: Tensor of shape [n, d].
+            y: Tensor of shape [m, d].
+            sigma: Bandwidth of the Gaussian kernel.
+        Returns:
+            A [n, m] kernel matrix.
+        """
+        x_norm = tf.reduce_sum(tf.square(x), axis=1, keepdims=True)
+        y_norm = tf.reduce_sum(tf.square(y), axis=1, keepdims=True)
+        dist = x_norm - 2 * tf.matmul(x, y, transpose_b=True) + tf.transpose(y_norm)
+        return tf.exp(-dist / (2.0 * sigma**2))
 
-    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction cosine similarity score on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        cosine_sim = cosine_similarity(y_true, y_pred)
-        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
-        return cosine_score
+    def mmd_loss(self, source_features, target_features):
+        """
+        Multi-kernel MMD: average over RBFs with bandwidths in self.sigma_list
+        """
+        mmd_total = 0.0
+        for sigma in self.sigma_list:
+            K_ss = ADDA.gaussian_kernel(source_features, source_features, sigma)
+            K_tt = ADDA.gaussian_kernel(target_features, target_features, sigma)
+            K_st = ADDA.gaussian_kernel(source_features, target_features, sigma)
+            mmd_total += (
+                tf.reduce_mean(K_ss)
+              + tf.reduce_mean(K_tt)
+              - 2.0 * tf.reduce_mean(K_st)
+            )
+        return mmd_total / float(len(self.sigma_list))
 
-    def calc_loss(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the loss on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        loss = self.model.loss(y_true, y_pred).numpy()
-        return loss
+    @staticmethod
+    def coral_loss(source_features, target_features):
+        """
+        Computes CORAL loss between source and target features.
+        Both are [batch_size, feature_dim] Tensors.
+        """
+        s_mean = tf.reduce_mean(source_features, axis=0, keepdims=True)
+        t_mean = tf.reduce_mean(target_features, axis=0, keepdims=True)
+        s_centered = source_features - s_mean
+        t_centered = target_features - t_mean
+
+        cov_source = tf.matmul(tf.transpose(s_centered), s_centered)
+        cov_target = tf.matmul(tf.transpose(t_centered), t_centered)
+
+        return tf.reduce_mean(tf.square(cov_source - cov_target))
 
     @tf.function
     def train_discriminator_step(self, x_s, x_t, y_s, y_t):
@@ -284,7 +395,6 @@ class ADDA(PyRIIDModel):
         self.d_optimizer.apply_gradients(zip(grads, self.discriminator.trainable_variables))
     
         return d_loss
-    
     
     @tf.function
     def train_target_encoder_step(self, x_t):

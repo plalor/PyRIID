@@ -9,25 +9,32 @@ from tensorflow.keras.optimizers import Adam
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
 from riid.metrics import APE_score
+from sklearn.metrics import pairwise_distances
 from time import perf_counter as time
 
 
 class DAN(PyRIIDModel):
     """Classifier using Deep Adaptation Networks (DAN) for domain adaptation via 
     Maximum Mean Discrepancy  (MMD)."""
-    def __init__(self, optimizer=None, source_model=None, lmbda=1, sigma=1.0):
+    def __init__(self, optimizer=None, source_model=None, lmbda=1, sigma=None,
+                 kernel_num=7, kernel_mul=np.sqrt(2)):
         """
         Args:
             optimizer: tensorflow optimizer or optimizer name
             source_model: pretrained source model
             lmbda: weight for the MMD loss
-            sigma: bandwidth parameter for the Gaussian kernel used in MMD
+            sigma: base bandwidth for the Gaussian kernel; if None, use median heuristic
+            kernel_num: number of RBF kernels in the bank (33→ exponents −16…+16)
+            kernel_mul: geometric spacing between successive kernels (√2 per step)
         """
         super().__init__()
 
         self.optimizer = optimizer
         self.lmbda = lmbda
-        self.sigma = sigma
+        
+        self.base_sigma = sigma
+        self.kernel_num = kernel_num
+        self.kernel_mul = kernel_mul
 
         if source_model is not None:
             self.classification_loss = source_model.loss
@@ -97,6 +104,22 @@ class DAN(PyRIIDModel):
         source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
+
+        # Build sigma_list
+        if self.base_sigma is None:
+            feats_s = self.feature_extractor.predict(X_source, batch_size=batch_size)
+            feats_t = self.feature_extractor.predict(X_target, batch_size=batch_size)
+            feats = np.vstack([feats_s, feats_t])
+            dists = pairwise_distances(feats, metric="euclidean")
+            self.base_sigma = float(np.median(dists))
+            if verbose:
+                print(f"  [MMD] median heuristic σ = {self.base_sigma:.4g}")
+
+        center = self.kernel_num // 2
+        self.sigma_list = [
+            self.base_sigma * (self.kernel_mul ** (i - center))
+            for i in range(self.kernel_num)
+        ]
 
         # Create datasets.
         source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
@@ -194,31 +217,6 @@ class DAN(PyRIIDModel):
 
         ss.classified_by = self.model_id
 
-    def calc_APE_score(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction APE score on ss."""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        ape = APE_score(y_true, y_pred).numpy()
-        return ape
-
-    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction cosine similarity score on ss."""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        cosine_sim = cosine_similarity(y_true, y_pred)
-        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
-        return cosine_score
-
-    def calc_loss(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the loss on ss."""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        loss = self.model.loss(y_true, y_pred).numpy()
-        return loss
-
     @staticmethod
     def gaussian_kernel(x, y, sigma):
         """
@@ -236,17 +234,21 @@ class DAN(PyRIIDModel):
         return tf.exp(-dist / (2.0 * sigma**2))
 
     @staticmethod
-    def mmd_loss(source_features, target_features, sigma=1.0):
+    def mmd_loss(self, source_features, target_features):
         """
-        Computes the Maximum Mean Discrepancy (MMD) loss between source and target features.
-        Both are [batch_size, feature_dim] Tensors.
+        Multi-kernel MMD: average over RBFs with bandwidths in self.sigma_list
         """
-        K_ss = DAN.gaussian_kernel(source_features, source_features, sigma)
-        K_tt = DAN.gaussian_kernel(target_features, target_features, sigma)
-        K_st = DAN.gaussian_kernel(source_features, target_features, sigma)
-
-        mmd = tf.reduce_mean(K_ss) + tf.reduce_mean(K_tt) - 2 * tf.reduce_mean(K_st)
-        return mmd
+        mmd_total = 0.0
+        for sigma in self.sigma_list:
+            K_ss = DAN.gaussian_kernel(source_features, source_features, sigma)
+            K_tt = DAN.gaussian_kernel(target_features, target_features, sigma)
+            K_st = DAN.gaussian_kernel(source_features, target_features, sigma)
+            mmd_total += (
+                tf.reduce_mean(K_ss)
+              + tf.reduce_mean(K_tt)
+              - 2.0 * tf.reduce_mean(K_st)
+            )
+        return mmd_total / float(len(self.sigma_list))
 
     @tf.function
     def train_step(self, x_s, y_s, x_t):
@@ -256,7 +258,7 @@ class DAN(PyRIIDModel):
             class_loss = self.classification_loss(y_s, preds_s)
 
             f_t = self.feature_extractor(x_t, training=True)
-            mmd_val = self.mmd_loss(f_s, f_t, self.sigma)
+            mmd_val = self.mmd_loss(f_s, f_t)
             total_loss = class_loss + self.lmbda * mmd_val
 
         grads = tape.gradient(total_loss, self.source_model.trainable_variables)
