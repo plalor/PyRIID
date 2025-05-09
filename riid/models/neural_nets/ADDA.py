@@ -34,10 +34,6 @@ class ADDA(PyRIIDModel):
         self.discriminator_hidden_layers = discriminator_hidden_layers
         self.discriminator_loss = BinaryCrossentropy()
 
-        self.base_sigma = sigma
-        self.kernel_num = kernel_num
-        self.kernel_mul = kernel_mul
-
         if source_model is not None:
             self.classification_loss = source_model.loss
 
