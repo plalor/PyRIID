@@ -1,14 +1,13 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input
+from tensorflow.keras.layers import Input, Dropout, Activation
 from tensorflow.keras.losses import cosine_similarity
-from tensorflow.keras.models import Model
+from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.metrics import APE_score
 from sklearn.metrics import pairwise_distances
 from time import perf_counter as time
 
@@ -16,14 +15,14 @@ from time import perf_counter as time
 class DAN(PyRIIDModel):
     """Classifier using Deep Adaptation Networks (DAN) for domain adaptation via 
     Maximum Mean Discrepancy  (MMD)."""
-    def __init__(self, optimizer=None, source_model=None, lmbda=1, sigma=None,
-                 kernel_num=7, kernel_mul=np.sqrt(2)):
+    def __init__(self, optimizer=None, source_model=None, lmbda=1, sigma=1.0,
+                 kernel_num=11, kernel_mul=np.sqrt(2)):
         """
         Args:
             optimizer: tensorflow optimizer or optimizer name
             source_model: pretrained source model
             lmbda: weight for the MMD loss
-            sigma: base bandwidth for the Gaussian kernel; if None, use median heuristic
+            sigma: base bandwidth for the Gaussian kernel
             kernel_num: number of RBF kernels in the bank (33→ exponents −16…+16)
             kernel_mul: geometric spacing between successive kernels (√2 per step)
         """
@@ -40,11 +39,22 @@ class DAN(PyRIIDModel):
             self.classification_loss = source_model.loss
 
             # Remove dropout layers for stability
-            config = source_model.get_config()
-            filtered_layers = [layer for layer in config["layers"] if layer["class_name"] != "Dropout"]
-            config["layers"] = filtered_layers
-            self.source_model = Model.from_config(config)
+            def strip_dropout(layer):
+                if isinstance(layer, Dropout):
+                    return Activation('linear', name=layer.name)
+                return layer.__class__.from_config(layer.get_config())
+            
+            self.source_model = clone_model(
+                source_model,
+                clone_function=strip_dropout
+            )
+            self.source_model.build(source_model.input_shape)
             self.source_model.set_weights(source_model.get_weights())
+            self.source_model.compile(
+                optimizer=source_model.optimizer,
+                loss=source_model.loss,
+                metrics=source_model.metrics
+            )
 
             all_layers = self.source_model.layers
             feature_extractor_input = self.source_model.input
@@ -62,7 +72,7 @@ class DAN(PyRIIDModel):
 
         self.model = None
 
-    def fit(self, source_ss: SampleSet, target_ss: SampleSet, validation_ss: SampleSet,
+    def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
             batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
@@ -71,7 +81,9 @@ class DAN(PyRIIDModel):
                 and the spectra are either foreground (AKA, "net") or gross.
             target_ss: `SampleSet` of `n` training spectra from the target domain where `n` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
-            validation_ss: `SampleSet` of `m` validation spectra from the target domain where 
+            source_val_ss: `SampleSet` of `m` validation spectra from the source domain where 
+                `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
+            target_val_ss: `SampleSet` of `m` validation spectra from the target domain where 
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
@@ -101,19 +113,12 @@ class DAN(PyRIIDModel):
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
 
+        X_src_val = source_val_ss.get_samples().astype("float32")
+        X_tgt_val = target_val_ss.get_samples().astype("float32")
+
         source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
-
-        # Build sigma_list
-        if self.base_sigma is None:
-            feats_s = self.feature_extractor.predict(X_source[:1000], batch_size=batch_size)
-            feats_t = self.feature_extractor.predict(X_target[:1000], batch_size=batch_size)
-            feats = np.vstack([feats_s, feats_t])
-            dists = pairwise_distances(feats, metric="euclidean")
-            self.base_sigma = float(np.median(dists))
-            if verbose:
-                print(f"  [MMD] median heuristic σ = {self.base_sigma:.4g}")
 
         center = self.kernel_num // 2
         self.sigma_list = [
@@ -122,10 +127,21 @@ class DAN(PyRIIDModel):
         ]
 
         # Create datasets.
+        n_s = len(X_source) // batch_size
+        n_t = len(X_target) // batch_size
+        
         source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
-        source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
-        target_dataset = tf.data.Dataset.from_tensor_slices(X_target)
-        target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
+        target_dataset = tf.data.Dataset.from_tensor_slices((X_target))
+
+        if n_s < n_t:
+            source_dataset = source_dataset.repeat().shuffle(len(X_source)).batch(batch_size)
+            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
+        elif n_t < n_s:
+            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
+            target_dataset = target_dataset.repeat().shuffle(len(X_target)).batch(batch_size)
+        else:
+            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
+            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
 
         # Define model.
         self.model = Model(
@@ -142,8 +158,8 @@ class DAN(PyRIIDModel):
         )
 
         # Training loop.
-        self.history = {"class_loss": [], "total_loss": [], "mmd_loss": [], "val_ape_score": []}
-        best_val_ape = -np.inf
+        self.history = {"class_loss": [], "total_loss": [], "mmd_loss": [], "tgt_val_loss": [], "mmd_val_loss": []}
+        best_val_loss = np.inf
         best_weights = None
         t0 = time()
         for epoch in range(epochs):
@@ -161,24 +177,31 @@ class DAN(PyRIIDModel):
                 class_loss_avg.update_state(class_loss)
                 mmd_loss_avg.update_state(mmd_val)
 
-            val_ape_score = self.calc_APE_score(validation_ss, target_level=target_level, batch_size=batch_size)
+            tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
+
+            f_s_val = self.feature_extractor(X_src_val, training=False)
+            f_t_val = self.feature_extractor(X_tgt_val, training=False)
+            mmd_val_loss = self.mmd_loss(f_s_val, f_t_val).numpy()
+
             self.history["class_loss"].append(float(class_loss_avg.result()))
             self.history["total_loss"].append(float(total_loss_avg.result()))
             self.history["mmd_loss"].append(float(mmd_loss_avg.result()))
-            self.history["val_ape_score"].append(val_ape_score)
+            self.history["tgt_val_loss"].append(tgt_val_loss)
+            self.history["mmd_val_loss"].append(mmd_val_loss)
 
             # Save best model weights based on the validation APE score.
-            if val_ape_score > best_val_ape:
-                best_val_ape = val_ape_score
+            if tgt_val_loss < best_val_loss:
+                best_val_loss = tgt_val_loss
                 best_weights = self.model.get_weights()
 
             if verbose:
                 print(f"Finished in {time()-t1:.0f} seconds")
                 print("  "
-                      f"total_loss: {total_loss_avg.result():.4f} - "
-                      f"class_loss: {class_loss_avg.result():.4f} - "
-                      f"mmd_loss: {mmd_loss_avg.result():.4f} - "
-                      f"val_ape_score: {val_ape_score:.4f}")
+                      f"total_loss: {total_loss_avg.result():.3g} - "
+                      f"class_loss: {class_loss_avg.result():.3g} - "
+                      f"mmd_loss: {mmd_loss_avg.result():.3g} - "
+                      f"tgt_val_loss: {tgt_val_loss:.3g} - "
+                      f"mmd_val_loss: {mmd_val_loss:.3g}")
 
         self.history["training_time"] = time() - t0
         if best_weights is not None:
@@ -233,7 +256,6 @@ class DAN(PyRIIDModel):
         dist = x_norm - 2 * tf.matmul(x, y, transpose_b=True) + tf.transpose(y_norm)
         return tf.exp(-dist / (2.0 * sigma**2))
 
-    @staticmethod
     def mmd_loss(self, source_features, target_features):
         """
         Multi-kernel MMD: average over RBFs with bandwidths in self.sigma_list

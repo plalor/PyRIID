@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Input, Dropout, Activation
+from tensorflow.keras.initializers import RandomNormal
 from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
@@ -14,14 +15,13 @@ from time import perf_counter as time
 
 class ADDA(PyRIIDModel):
     """Adversarial Discriminative Domain Adaptation classifier"""            
-    def __init__(self, activation=None, d_optimizer=None, t_optimizer=None, warmup_optimizer = None,
+    def __init__(self, activation=None, d_optimizer=None, t_optimizer=None,
                  source_model=None, discriminator_hidden_layers=None):
         """
         Args:
             activation: activation function to use for discriminator dense layer
             d_optimizer: tensorflow optimizer or optimizer name to use for training discriminator
             t_optimizer: tensorflow optimizer or optimizer name to use for training target encoder
-            warmup_optimizer: tensorflow optimizer for pretraining discriminator
             source_model: pretrained source model
             discriminator_hidden_layers: size of the dense layer(s) in the discriminator
         """
@@ -30,9 +30,8 @@ class ADDA(PyRIIDModel):
         self.activation = activation
         self.d_optimizer = d_optimizer
         self.t_optimizer = t_optimizer
-        self.warmup_optimizer = warmup_optimizer
         self.discriminator_hidden_layers = discriminator_hidden_layers
-        self.discriminator_loss = BinaryCrossentropy()
+        self.discriminator_loss = BinaryCrossentropy(label_smoothing=0.1) # soft labels
 
         if source_model is not None:
             self.classification_loss = source_model.loss
@@ -78,14 +77,12 @@ class ADDA(PyRIIDModel):
             self.d_optimizer = Adam(learning_rate=0.001)
         if self.t_optimizer is None:
             self.t_optimizer = Adam(learning_rate=0.001)
-        if self.warmup_optimizer is None:
-            self.warmup_optimizer = Adam(learning_rate=0.001)
 
         self.discriminator = None
         self.model = None
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
-            warmup_epochs: int = 10, batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
+            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -97,7 +94,6 @@ class ADDA(PyRIIDModel):
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             target_val_ss: `SampleSet` of `m` validation spectra from the target domain where 
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
-            warmup_epochs: number of epochs to pretrain the discriminator
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
             target_level: `SampleSet.sources` column level to use
@@ -160,12 +156,28 @@ class ADDA(PyRIIDModel):
         ### Build discriminator
         if not self.discriminator:
             input_shape = self.source_encoder.output_shape[1]
+            # inputs = Input(shape=(input_shape,), name="features")
+            # x = inputs
+            # for layer, nodes in enumerate(self.discriminator_hidden_layers):
+            #     x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
+            # output = Dense(1, activation="sigmoid", name="discriminator")(x)
+            # self.discriminator = Model(inputs, output)
+
+            ### This is what they do in the ADDA paper
+            from tensorflow.keras.layers import LeakyReLU, Dropout
+            init = RandomNormal(mean=0.0, stddev=0.02)
             inputs = Input(shape=(input_shape,), name="features")
             x = inputs
-            for layer, nodes in enumerate(self.discriminator_hidden_layers):
-                x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
-            output = Dense(1, activation="sigmoid", name="discriminator")(x)
-            self.discriminator = Model(inputs, output)
+            
+            for i, nodes in enumerate(self.discriminator_hidden_layers):
+                x = Dense(nodes, kernel_initializer=init, name=f"dense_{i}")(x)
+                x = LeakyReLU(negative_slope=0.2, name=f"leakyrelu_{i}")(x)
+                x = Dropout(0.3, name=f"dropout_{i}")(x)
+            
+            output = Dense(1, activation="sigmoid", kernel_initializer=init, name="discriminator")(x)
+            ###
+            
+            self.discriminator = Model(inputs, output, name="Discriminator")
 
         # Define ADDA model using target encoder and source classifier
         self.model = Model(
@@ -180,43 +192,10 @@ class ADDA(PyRIIDModel):
             normalization=source_ss.spectra_state,
         )
 
-        # Warmup the discriminator
-        if warmup_epochs > 0:
-            if verbose:
-                print("Warming up discriminator:")
-            d_optimizer = self.d_optimizer # save for later
-            self.d_optimizer = self.warmup_optimizer # use this optimizer for warming up
-            for epoch in range(warmup_epochs):
-                if verbose:
-                    print(f"Epoch {epoch+1}/{warmup_epochs}")
-                    t1 = time()
-    
-                for (x_s, y_s), (x_t, y_t) in zip(source_dataset, target_dataset):
-                    d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
-    
-                f_s = self.source_encoder(X_src_val, training=False)
-                f_t = self.target_encoder(X_tgt_val, training=False)
-        
-                pred_s = self.discriminator(f_s, training=False)
-                pred_t = self.discriminator(f_t, training=False)
-    
-                domain_preds_s = np.round(pred_s).astype(int).flatten()
-                domain_preds_t = np.round(pred_t).astype(int).flatten()
-                
-                domain_acc_s = accuracy_score(domain_src_val, domain_preds_s)
-                domain_acc_t = accuracy_score(domain_tgt_val, domain_preds_t)
-    
-                if verbose:
-                    print(f"Finished in {time()-t1:.0f} seconds")
-                    print(f"  d_loss: {d_loss:.4f} - domain_acc_s: {domain_acc_s:.4f} - domain_acc_t: {domain_acc_t:.4f}")
-                    
-            self.d_optimizer = d_optimizer # restore d_optimizer for training loop
-
         # Training loop
-        self.history = {"d_loss": [], "t_loss": [], "src_val_loss": [], "tgt_val_loss": [],
-                        "d_val_loss": [], "coral": [], "entropy": []}
+        self.history = {"d_loss": [], "t_loss": [], "tgt_val_loss": [], "d_val_loss": []}
 
-        best_val = np.inf
+        best_val_loss = np.inf
         best_weights = None
         t0 = time()
         for epoch in range(epochs):
@@ -228,40 +207,32 @@ class ADDA(PyRIIDModel):
                 d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
                 t_loss = self.train_target_encoder_step(x_t)
 
-            Y_src_pred = self.model.predict(X_src_val, batch_size=batch_size)
-            src_val_loss = self.model.loss(isotope_src_val, Y_src_pred).numpy()
-            
-            Y_tgt_pred = self.model.predict(X_tgt_val, batch_size=batch_size)
-            tgt_val_loss = self.model.loss(isotope_tgt_val, Y_tgt_pred).numpy()
-            
+            tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
+
             f_s_val = self.source_encoder.predict(X_src_val, batch_size=batch_size)
             f_t_val = self.target_encoder.predict(X_tgt_val, batch_size=batch_size)
-            coral = self.coral_loss(f_s_val, f_t_val)
 
             f_s = tf.concat([f_s_val, f_t_val], axis=0)
             pred = self.discriminator(f_s, training=False)
-            d_val_loss = self.discriminator_loss(domain_val, pred)
-
-            H = -np.sum(Y_tgt_pred * np.log(Y_tgt_pred + 1e-8), axis=1)
-            entropy_tgt = H.mean()
+            d_val_loss = self.discriminator_loss(domain_val, pred).numpy()
 
             self.history["d_loss"].append(float(d_loss))
             self.history["t_loss"].append(float(t_loss))
-            self.history["src_val_loss"].append(src_val_loss)
             self.history["tgt_val_loss"].append(tgt_val_loss)
             self.history["d_val_loss"].append(d_val_loss)
-            self.history["coral"].append(coral)
-            self.history["entropy"].append(entropy_tgt)
         
             # save best model weights based on validation score
-            if tgt_val_loss < best_val:
-                best_val = tgt_val_loss
+            if tgt_val_loss < best_val_loss:
+                best_val_loss = tgt_val_loss
                 best_weights = self.model.get_weights()
 
             if verbose:
                 print(f"Finished in {time()-t1:.0f} seconds")
-                print(f"  d_loss: {d_loss:.4f} - t_loss: {t_loss:.4f} - src_val_loss: {src_val_loss:.4f} "
-                      f"- tgt_val_loss: {tgt_val_loss:.4f}")
+                print("  "
+                      f"d_loss: {d_loss:.3g} - "
+                      f"t_loss: {t_loss:.3g} - "
+                      f"tgt_val_loss: {tgt_val_loss:.3g} - "
+                      f"d_val_loss: {d_val_loss:.3g}")
 
         self.history["training_time"] = time() - t0
         if best_weights is not None:

@@ -1,13 +1,12 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from keras.utils import Sequence
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.layers import Dense, Input, Dropout, Reshape, LSTM, Bidirectional, Reshape, Flatten
+from tensorflow.keras.layers import Dense, Input, Dropout, Reshape, LSTM, Bidirectional, Lambda
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l1, l2
+from tensorflow.keras.regularizers import l2
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
@@ -16,14 +15,11 @@ from time import perf_counter as time
 
 class LSTMClassifier(PyRIIDModel):
     """LSTM classifier."""
-    def __init__(self, activation=None, loss=None, optimizer=None,
-                 metrics=None, l2_alpha: float = 1e-4,
-                 activity_regularizer=None, final_activation=None,
-                 hidden_layers=None, patch_size=None, bidirectional=False, 
-                 dropout=0):
+    def __init__(self, loss=None, optimizer=None, metrics=None, l2_alpha=None,
+                 activity_regularizer=None, final_activation=None, hidden_layers=None,
+                 patch_size=None, stride=None, bidirectional=False, dropout=0):
         """
         Args:
-            activation: activation function to use for each dense layer
             loss: loss function to use for training
             optimizer: tensorflow optimizer or optimizer name to use for training
             metrics: list of metrics to be evaluating during training
@@ -31,32 +27,25 @@ class LSTMClassifier(PyRIIDModel):
             activity_regularizer: regularizer function applied each dense layer output
             final_activation: final activation function to apply to model output
             hidden_layers: hidden layer structure of the MLP
+            patch_size: size of patches to reshape the input spectrum
+            stride: step size between each patch
+            bidirectional: whether to use a birdirectional LSTM
             dropout: optional droupout layer after each hidden layer
         """
         super().__init__()
 
-        self.loss = loss
-        self.optimizer = optimizer
-        self.metrics = metrics
-        self.l2_alpha = l2_alpha
+        self.loss = loss or CategoricalCrossentropy()
+        self.optimizer = optimizer or Adam(learning_rate=0.001)
+        self.metrics = metrics or [CategoricalCrossentropy()]
+        self.kernel_regularizer = l2(l2_alpha) if l2_alpha else None
         self.activity_regularizer = activity_regularizer
-        self.final_activation = final_activation
+        self.final_activation = final_activation or "softmax"
 
         self.hidden_layers = hidden_layers
         self.patch_size = patch_size
+        self.stride = stride or self.patch_size
         self.bidirectional = bidirectional
         self.dropout = dropout
-
-        if self.loss is None:
-            self.loss = CategoricalCrossentropy()
-        if self.optimizer is None:
-            self.optimizer = Adam(learning_rate=0.001)
-        if self.metrics is None:
-            self.metrics = [CategoricalCrossentropy()]
-        if self.activity_regularizer is None:
-            self.activity_regularizer = l1(0.0)
-        if self.final_activation is None:
-            self.final_activation = "softmax"
 
         self.model = None
 
@@ -115,8 +104,17 @@ class LSTMClassifier(PyRIIDModel):
         if not self.model:
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
-            seq_length = input_shape // self.patch_size
-            x = Reshape((seq_length, self.patch_size), name="reshape_patches")(inputs)
+
+            num_patches = (input_shape - self.patch_size) // self.stride + 1
+            x = Lambda(lambda z: tf.signal.frame(
+                    z,
+                    frame_length=self.patch_size,
+                    frame_step=self.stride,
+                    axis=1
+                ),
+                output_shape=(num_patches, self.patch_size),
+                name="extract_patches"
+            )(inputs)
 
             for layer, units in enumerate(self.hidden_layers):
                 return_sequences = layer < len(self.hidden_layers) - 1
@@ -125,7 +123,7 @@ class LSTMClassifier(PyRIIDModel):
                         LSTM(units // 2,
                              activation='tanh',
                              recurrent_activation='sigmoid',
-                             kernel_regularizer=l2(self.l2_alpha),
+                             kernel_regularizer=self.kernel_regularizer,
                              activity_regularizer=self.activity_regularizer,
                              dropout=self.dropout,
                              recurrent_dropout=self.dropout,
@@ -138,7 +136,7 @@ class LSTMClassifier(PyRIIDModel):
                     lstm_layer = LSTM(units,
                              activation='tanh',
                              recurrent_activation='sigmoid',
-                             kernel_regularizer=l2(self.l2_alpha),
+                             kernel_regularizer=self.kernel_regularizer,
                              activity_regularizer=self.activity_regularizer,
                              dropout=self.dropout,
                              recurrent_dropout=self.dropout,

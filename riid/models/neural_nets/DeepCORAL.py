@@ -1,14 +1,13 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input
+from tensorflow.keras.layers import Input, Dropout, Activation
 from tensorflow.keras.losses import cosine_similarity
-from tensorflow.keras.models import Model
+from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.metrics import APE_score
 from time import perf_counter as time
 
 
@@ -30,11 +29,22 @@ class DeepCORAL(PyRIIDModel):
             self.classification_loss = source_model.loss
 
             # Remove dropout layers for stability
-            config = source_model.get_config()
-            filtered_layers = [layer for layer in config["layers"] if layer["class_name"] != "Dropout"]
-            config["layers"] = filtered_layers
-            self.source_model = Model.from_config(config)
+            def strip_dropout(layer):
+                if isinstance(layer, Dropout):
+                    return Activation('linear', name=layer.name)
+                return layer.__class__.from_config(layer.get_config())
+            
+            self.source_model = clone_model(
+                source_model,
+                clone_function=strip_dropout
+            )
+            self.source_model.build(source_model.input_shape)
             self.source_model.set_weights(source_model.get_weights())
+            self.source_model.compile(
+                optimizer=source_model.optimizer,
+                loss=source_model.loss,
+                metrics=source_model.metrics
+            )
 
             all_layers = self.source_model.layers
             feature_extractor_input = self.source_model.input
@@ -52,7 +62,7 @@ class DeepCORAL(PyRIIDModel):
 
         self.model = None
 
-    def fit(self, source_ss: SampleSet, target_ss: SampleSet, validation_ss: SampleSet,
+    def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
             batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
@@ -61,7 +71,9 @@ class DeepCORAL(PyRIIDModel):
                 and the spectra are either foreground (AKA, "net") or gross.
             target_ss: `SampleSet` of `n` training spectra from the target domain where `n` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
-            validation_ss: `SampleSet` of `m` validation spectra from the target domain where 
+            source_val_ss: `SampleSet` of `m` validation spectra from the source domain where 
+                `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
+            target_val_ss: `SampleSet` of `m` validation spectra from the target domain where 
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
@@ -91,15 +103,29 @@ class DeepCORAL(PyRIIDModel):
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
 
+        X_src_val = source_val_ss.get_samples().astype("float32")
+        X_tgt_val = target_val_ss.get_samples().astype("float32")
+
         source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
 
         # Make datasets
+        n_s = len(X_source) // batch_size
+        n_t = len(X_target) // batch_size
+        
         source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
-        source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
         target_dataset = tf.data.Dataset.from_tensor_slices((X_target))
-        target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
+
+        if n_s < n_t:
+            source_dataset = source_dataset.repeat().shuffle(len(X_source)).batch(batch_size)
+            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
+        elif n_t < n_s:
+            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
+            target_dataset = target_dataset.repeat().shuffle(len(X_target)).batch(batch_size)
+        else:
+            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
+            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
 
         # Define CORAL model
         self.model = Model(
@@ -116,8 +142,8 @@ class DeepCORAL(PyRIIDModel):
         )
 
         # Training loop
-        self.history = {"class_loss": [], "total_loss": [], "coral_loss": [], "val_ape_score": []}
-        best_val_ape = -np.inf
+        self.history = {"class_loss": [], "total_loss": [], "coral_loss": [], "tgt_val_loss": [], "coral_val_loss": []}
+        best_val_loss = np.inf
         best_weights = None
         t0 = time()
         for epoch in range(epochs):
@@ -135,24 +161,31 @@ class DeepCORAL(PyRIIDModel):
                 class_loss_avg.update_state(class_loss)
                 coral_loss_avg.update_state(coral_val)
 
-            val_ape_score = self.calc_APE_score(validation_ss, target_level=target_level, batch_size=batch_size)
+            tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
+
+            f_s_val = self.feature_extractor(X_src_val, training=False)
+            f_t_val = self.feature_extractor(X_tgt_val, training=False)
+            coral_val_loss = self.coral_loss(f_s_val, f_t_val).numpy()
+
             self.history["class_loss"].append(float(class_loss_avg.result()))
             self.history["total_loss"].append(float(total_loss_avg.result()))
             self.history["coral_loss"].append(float(coral_loss_avg.result()))
-            self.history["val_ape_score"].append(val_ape_score)
+            self.history["tgt_val_loss"].append(tgt_val_loss)
+            self.history["coral_val_loss"].append(coral_val_loss)
 
-            # Save best model weights based on the validation APE score
-            if val_ape_score > best_val_ape:
-                best_val_ape = val_ape_score
+            # Save best model weights based on the validation loss
+            if tgt_val_loss < best_val_loss:
+                best_val_loss = tgt_val_loss
                 best_weights = self.model.get_weights()
 
             if verbose:
                 print(f"Finished in {time()-t1:.0f} seconds")
                 print("  "
-                      f"total_loss: {total_loss_avg.result():.4f} - "
-                      f"class_loss: {class_loss_avg.result():.4f} - "
-                      f"coral_loss: {coral_loss_avg.result():.4f} - "
-                      f"val_ape_score: {val_ape_score:.4f}")
+                      f"total_loss: {total_loss_avg.result():.3g} - "
+                      f"class_loss: {class_loss_avg.result():.3g} - "
+                      f"coral_loss: {coral_loss_avg.result():.3g} - "
+                      f"tgt_val_loss: {tgt_val_loss:.3g} - "
+                      f"coral_val_loss: {coral_val_loss:.3g}")
 
         self.history["training_time"] = time() - t0
         if best_weights is not None:
@@ -191,44 +224,22 @@ class DeepCORAL(PyRIIDModel):
 
         ss.classified_by = self.model_id
 
-    def calc_APE_score(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction APE score on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        ape = APE_score(y_true, y_pred).numpy()
-        return ape
-
-    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction cosine similarity score on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        cosine_sim = cosine_similarity(y_true, y_pred)
-        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
-        return cosine_score
-
-    def calc_loss(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the loss on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        loss = self.model.loss(y_true, y_pred).numpy()
-        return loss
-
     @staticmethod
     def coral_loss(source_features, target_features):
         """
         Computes CORAL loss between source and target features.
         Both are [batch_size, feature_dim] Tensors.
         """
+        n_s = tf.cast(tf.shape(source_features)[0], tf.float32)
+        n_t = tf.cast(tf.shape(target_features)[0], tf.float32)
+    
         s_mean = tf.reduce_mean(source_features, axis=0, keepdims=True)
         t_mean = tf.reduce_mean(target_features, axis=0, keepdims=True)
         s_centered = source_features - s_mean
         t_centered = target_features - t_mean
 
-        cov_source = tf.matmul(tf.transpose(s_centered), s_centered)
-        cov_target = tf.matmul(tf.transpose(t_centered), t_centered)
+        cov_source = tf.matmul(tf.transpose(s_centered), s_centered) / (n_s - 1)
+        cov_target = tf.matmul(tf.transpose(t_centered), t_centered) / (n_t - 1)
 
         return tf.reduce_mean(tf.square(cov_source - cov_target))
 

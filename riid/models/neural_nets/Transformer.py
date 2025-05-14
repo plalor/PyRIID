@@ -1,14 +1,12 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from keras.utils import Sequence
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras import layers
-from tensorflow.keras.layers import Dense, Input, Dropout, Flatten
+from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, \
+    MultiHeadAttention, LayerNormalization, GlobalAveragePooling1D
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l1, l2
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
@@ -17,55 +15,39 @@ from time import perf_counter as time
 
 class Transformer(PyRIIDModel):
     """Transformer classifier."""
-    def __init__(self, activation=None, loss=None, optimizer=None,
-                 metrics=None, l2_alpha: float = 1e-4,
-                 activity_regularizer=None, final_activation=None,
-                 embed_dim=None, num_heads=None, ff_dim=None, num_layers=None, 
-                 patch_size=None, dropout=0):
+    def __init__(self, activation=None, loss=None, optimizer=None, metrics=None,
+                 final_activation=None, embed_dim=None, num_heads=None, ff_dim=None,
+                 num_layers=None, patch_size=None, stride=None, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
             loss: loss function to use for training
             optimizer: tensorflow optimizer or optimizer name to use for training
             metrics: list of metrics to be evaluating during training
-            l2_alpha: alpha value for the L2 regularization of each dense layer
-            activity_regularizer: regularizer function applied each dense layer output
             final_activation: final activation function to apply to model output
-            dropout: optional droupout layer after each hidden layer
             embed_dim: size of the embedding vector
             num_heads: number of attention heads
             ff_dim: dimension of feed-forward network
             num_layers: number of transformer blocks
+            patch_size: size of patches to reshape the input spectrum
+            stride: step size between each patch
+            dropout: optional droupout layer after each hidden layer
         """
         super().__init__()
 
-        self.activation = activation
-        self.loss = loss
-        self.optimizer = optimizer
-        self.metrics = metrics
-        self.l2_alpha = l2_alpha
-        self.activity_regularizer = activity_regularizer
-        self.final_activation = final_activation
+        self.activation = activation or "relu"
+        self.loss = loss or CategoricalCrossentropy()
+        self.optimizer = optimizer or Adam(learning_rate=0.001)
+        self.metrics = metrics or [CategoricalCrossentropy()]
+        self.final_activation = final_activation or "softmax"
 
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.ff_dim = ff_dim
         self.num_layers = num_layers
         self.patch_size = patch_size
+        self.stride = stride or self.patch_size
         self.dropout = dropout
-
-        if self.activation is None:
-            self.activation = "relu"
-        if self.loss is None:
-            self.loss = CategoricalCrossentropy()
-        if self.optimizer is None:
-            self.optimizer = Adam(learning_rate=0.001)
-        if self.metrics is None:
-            self.metrics = [CategoricalCrossentropy()]
-        if self.activity_regularizer is None:
-            self.activity_regularizer = l1(0.0)
-        if self.final_activation is None:
-            self.final_activation = "softmax"
 
         self.model = None
 
@@ -124,28 +106,47 @@ class Transformer(PyRIIDModel):
         if not self.model:
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
-            seq_length = input_shape // self.patch_size
-            x = layers.Reshape((seq_length, self.patch_size), name="reshape_patches")(inputs)
+
+            num_patches = (input_shape - self.patch_size) // self.stride + 1
+            x = Lambda(lambda z: tf.signal.frame(
+                    z,
+                    frame_length=self.patch_size,
+                    frame_step=self.stride,
+                    axis=1
+                ),
+                output_shape=(num_patches, self.patch_size),
+                name="extract_patches"
+            )(inputs)
+            
             x = Dense(self.embed_dim, name="dense_embedding")(x)
 
-            positions = tf.range(start=0, limit=seq_length, delta=1, name="position_indices")
-            position_embedding = layers.Embedding(input_dim=seq_length, output_dim=self.embed_dim, name="position_embedding")(positions)
-            x = x + position_embedding
+            pos_indices = Lambda(
+                lambda z: tf.range(num_patches)[tf.newaxis, :],
+                name="make_positions"
+            )(x)
+
+            pos_embed = Embedding(
+                input_dim=num_patches,
+                output_dim=self.embed_dim,
+                name="position_embedding"
+            )(pos_indices)
+
+            x = Add(name="add_pos")([x, pos_embed])
 
             for layer in range(self.num_layers):
-                attention_output = layers.MultiHeadAttention(num_heads=self.num_heads, 
+                attention_output = MultiHeadAttention(num_heads=self.num_heads, 
                                                 key_dim=self.embed_dim // self.num_heads,
                                                 name=f"multi_head_attention_{layer}")(x, x)
                 if self.dropout > 0:
                     attention_output = Dropout(self.dropout, name=f"mha_dropout_{layer}")(attention_output)
-                attention_output = layers.LayerNormalization(epsilon=1e-6, name=f"mha_layernorm_{layer}")(x + attention_output)
-                ffn_output = layers.Dense(self.ff_dim, activation=self.activation, name=f"ffn_dense1_{layer}")(attention_output)
-                ffn_output = layers.Dense(self.embed_dim, name=f"ffn_dense2_{layer}")(ffn_output)
+                attention_output = LayerNormalization(epsilon=1e-6, name=f"mha_layernorm_{layer}")(x + attention_output)
+                ffn_output = Dense(self.ff_dim, activation=self.activation, name=f"ffn_dense1_{layer}")(attention_output)
+                ffn_output = Dense(self.embed_dim, name=f"ffn_dense2_{layer}")(ffn_output)
                 if self.dropout > 0:
                     ffn_output = Dropout(self.dropout, name=f"ffn_dropout_{layer}")(ffn_output)
-                x = layers.LayerNormalization(epsilon=1e-6, name=f"ffn_layernorm_{layer}")(attention_output + ffn_output)
+                x = LayerNormalization(epsilon=1e-6, name=f"ffn_layernorm_{layer}")(attention_output + ffn_output)
             
-            x = layers.GlobalAveragePooling1D(name="global_avg_pool")(x)
+            x = GlobalAveragePooling1D(name="global_avg_pool")(x)
             if self.dropout > 0:
                 x = Dropout(self.dropout, name="dropout_layer")(x)
 

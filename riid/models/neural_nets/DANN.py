@@ -37,11 +37,22 @@ class DANN(PyRIIDModel):
             self.classification_loss = source_model.loss
 
             # Remove dropout layers for stability
-            config = source_model.get_config()
-            filtered_layers = [layer for layer in config["layers"] if layer["class_name"] != "Dropout"]
-            config["layers"] = filtered_layers
-            self.source_model = Model.from_config(config)
+            def strip_dropout(layer):
+                if isinstance(layer, Dropout):
+                    return Activation('linear', name=layer.name)
+                return layer.__class__.from_config(layer.get_config())
+            
+            self.source_model = clone_model(
+                source_model,
+                clone_function=strip_dropout
+            )
+            self.source_model.build(source_model.input_shape)
             self.source_model.set_weights(source_model.get_weights())
+            self.source_model.compile(
+                optimizer=source_model.optimizer,
+                loss=source_model.loss,
+                metrics=source_model.metrics
+            )
 
             all_layers = self.source_model.layers
             feature_extractor_input = self.source_model.input
@@ -59,7 +70,7 @@ class DANN(PyRIIDModel):
 
         self.model = None
 
-    def fit(self, source_ss: SampleSet, target_ss: SampleSet, validation_ss: SampleSet, 
+    def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
             batch_size: int = 200, epochs: int = 20, callbacks = None, patience: int = 10**4, 
             es_monitor: str = "val_ape_score", es_mode: str = "max", es_verbose=0, 
             target_level="Isotope", verbose: bool = False):
@@ -70,7 +81,9 @@ class DANN(PyRIIDModel):
                 and the spectra are either foreground (AKA, "net") or gross.
             target_ss: `SampleSet` of `n` training spectra from the target domain where `n` >= 1
                 and the spectra are either foreground (AKA, "net") or gross.
-            validation_ss: `SampleSet` of `m` validation spectra from the target domain where 
+            source_val_ss: `SampleSet` of `m` validation spectra from the source domain where 
+                `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
+            target_val_ss: `SampleSet` of `m` validation spectra from the target domain where 
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
@@ -104,6 +117,9 @@ class DANN(PyRIIDModel):
         ### Preparing training data
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
+
+        X_src_val = source_val_ss.get_samples().astype("float32")
+        X_tgt_val = target_val_ss.get_samples().astype("float32")
                 
         # Class labels (set dummy labels for target domain)
         source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T

@@ -1,13 +1,12 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from keras.utils import Sequence
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l1, l2
+from tensorflow.keras.regularizers import l2
 
 from riid import SampleSet, SpectraType, SpectraState, read_hdf
 from riid.models.base import ModelInput, PyRIIDModel
@@ -17,9 +16,9 @@ from time import perf_counter as time
 class CNN(PyRIIDModel):
     """Convolutional neural network classifier."""
     def __init__(self, activation=None, loss=None, optimizer=None,
-                 metrics=None, l2_alpha: float = 1e-4,
-                 activity_regularizer=None, final_activation=None,
-                 convolutional_layers=None, dense_layer_sizes=None, dropout=0):
+                 metrics=None, l2_alpha=None, activity_regularizer=None,
+                 final_activation=None, convolutional_layers=None,
+                 dense_layer_sizes=None, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -35,30 +34,17 @@ class CNN(PyRIIDModel):
         """
         super().__init__()
 
-        self.activation = activation
-        self.loss = loss
-        self.optimizer = optimizer
-        self.metrics = metrics
-        self.l2_alpha = l2_alpha
+        self.activation = activation or "relu"
+        self.loss = loss or CategoricalCrossentropy()
+        self.optimizer = optimizer or Adam(learning_rate=0.001)
+        self.metrics = metrics or [CategoricalCrossentropy()]
+        self.kernel_regularizer = l2(l2_alpha) if l2_alpha else None
         self.activity_regularizer = activity_regularizer
-        self.final_activation = final_activation
+        self.final_activation = final_activation or "softmax"
 
         self.convolutional_layers = convolutional_layers
         self.dense_layer_sizes = dense_layer_sizes
         self.dropout = dropout
-
-        if self.activation is None:
-            self.activation = "relu"
-        if self.loss is None:
-            self.loss = CategoricalCrossentropy()
-        if self.optimizer is None:
-            self.optimizer = Adam(learning_rate=0.001)
-        if self.metrics is None:
-            self.metrics = [CategoricalCrossentropy()]
-        if self.activity_regularizer is None:
-            self.activity_regularizer = l1(0.0)
-        if self.final_activation is None:
-            self.final_activation = "softmax"
 
         self.model = None
 
@@ -124,7 +110,7 @@ class CNN(PyRIIDModel):
                     kernel_size=kernel_size,
                     activation=self.activation,
                     activity_regularizer=self.activity_regularizer,
-                    kernel_regularizer=l2(self.l2_alpha),
+                    kernel_regularizer=self.kernel_regularizer,
                     name=f"conv_{layer}"
                 )(x)
                 x = MaxPooling1D(pool_size=2, name=f"maxpool_{layer}")(x)
