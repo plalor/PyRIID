@@ -1,37 +1,39 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.layers import Dense, Input, Layer
-from tensorflow.keras.losses import cosine_similarity
-from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Input, Layer, Dropout, Activation
+from tensorflow.keras.losses import BinaryCrossentropy
+from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
-from riid import SampleSet, SpectraType, SpectraState, read_hdf
+from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.metrics import APE_score
-from sklearn.metrics import accuracy_score
 from time import perf_counter as time
 
 
 class DANN(PyRIIDModel):
     """Domain Adversarial Neural Network classifier."""
-    def __init__(self, optimizer=None, source_model=None, grl_layer_size=0,
-                 gamma=10, lmbda=0):
+    def __init__(self, activation=None, d_optimizer=None, f_optimizer=None,
+                 source_model=None, grl_hidden_layers=None, gamma=10, lmbda=0):
         """
         Args:
-            optimizer: tensorflow optimizer or optimizer name to use for training
+            activation: activation function to use for discriminator dense layer
+            d_optimizer: tensorflow optimizer or optimizer name for the discriminator
+            f_optimizer: tensorflow optimizer or optimizer name for the feature extractor
             source_model: pretrained source model
-            grl_layer_size: size of the gradient reversal dense layer
+            grl_hidden_layers: sizes of the gradient reversal dense layers
             gamma: hyperparameter for adjusting domain adaptation parameter
             lmbda: domain adaptation parameter. Ignored if gamma is specified
         """
         super().__init__()
 
-        self.optimizer = optimizer
-        self.grl_layer_size = grl_layer_size
+        self.activation = activation or "relu"
+        self.d_optimizer = d_optimizer or Adam(learning_rate=0.001)
+        self.f_optimizer = f_optimizer or Adam(learning_rate=0.001)
+        self.grl_hidden_layers = grl_hidden_layers
         self.gamma = gamma
         self.lmbda = lmbda
+        self.discriminator_loss = BinaryCrossentropy()
 
         if source_model is not None:
             self.classification_loss = source_model.loss
@@ -64,16 +66,9 @@ class DANN(PyRIIDModel):
             self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
         else:
             print("WARNING: no pretrained source model was provided")
-            
-        if self.optimizer is None:
-            self.optimizer = Adam(learning_rate=0.001)
-
-        self.model = None
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
-            batch_size: int = 200, epochs: int = 20, callbacks = None, patience: int = 10**4, 
-            es_monitor: str = "val_ape_score", es_mode: str = "max", es_verbose=0, 
-            target_level="Isotope", verbose: bool = False):
+            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -87,11 +82,6 @@ class DANN(PyRIIDModel):
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
-            callbacks: list of callbacks to be passed to the TensorFlow `Model.fit()` method
-            patience: number of epochs to wait for `EarlyStopping` object
-            es_monitor: quantity to be monitored for `EarlyStopping` object
-            es_mode: mode for `EarlyStopping` object
-            es_verbose: verbosity level for `EarlyStopping` object
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
 
@@ -120,108 +110,127 @@ class DANN(PyRIIDModel):
 
         X_src_val = source_val_ss.get_samples().astype("float32")
         X_tgt_val = target_val_ss.get_samples().astype("float32")
-                
-        # Class labels (set dummy labels for target domain)
+
         source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T
         model_outputs = source_contributions_df.columns.values.tolist()
-        class_labels_source = source_contributions_df.values.astype("float32")
-        dummy_labels = np.zeros((len(X_target), class_labels_source.shape[1]))
-        class_labels_target = dummy_labels.astype("float32")
-        
-        # Domain labels: 0 for source, 1 for target
-        domain_labels_source = np.zeros((len(X_source), 1), dtype=np.float32)
-        domain_labels_target = np.ones((len(X_target), 1), dtype=np.float32)
+        Y_source = source_contributions_df.values.astype("float32")
 
         # Make datasets
-        def merge_batches(source_batch, target_batch):
-            X_s, y_s_cls, y_s_dom = source_batch
-            X_t, y_t_cls, y_t_dom = target_batch
-
-            X = tf.concat([X_s, X_t], axis=0)
-            class_labels = tf.concat([y_s_cls, y_t_cls], axis=0)
-            domain_labels = tf.concat([y_s_dom, y_t_dom], axis=0)
-            labels_dict = {"classifier": class_labels, "discriminator": domain_labels}
-
-            batch_size_s = tf.shape(X_s)[0]
-            batch_size_t = tf.shape(X_t)[0]
-            weights_classifier = tf.concat([
-                tf.ones((batch_size_s,), dtype=tf.float32),
-                tf.zeros((batch_size_t,), dtype=tf.float32)
-            ], axis=0)
-            weights_discriminator = tf.ones((batch_size_s + batch_size_t,), dtype=tf.float32)
-
-            weights_dict = {
-                "classifier": weights_classifier,
-                "discriminator": weights_discriminator
-            }
-
-            return X, labels_dict, weights_dict
-
         half_batch_size = batch_size // 2
-        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, class_labels_source, domain_labels_source))
-        source_dataset = source_dataset.shuffle(len(X_source)).batch(half_batch_size)
-        target_dataset = tf.data.Dataset.from_tensor_slices((X_target, class_labels_target, domain_labels_target))
-        target_dataset = target_dataset.shuffle(len(X_target)).batch(half_batch_size)
-        combined_dataset = tf.data.Dataset.zip((source_dataset, target_dataset))
-        combined_dataset = combined_dataset.map(merge_batches)
+        steps_per_epoch = max(
+            len(X_source) // half_batch_size,
+            len(X_target) // half_batch_size
+        )
+        
+        source_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_source, Y_source))
+              .shuffle(len(X_source))
+              .repeat()
+              .batch(half_batch_size, drop_remainder=True)
+        )
+        
+        target_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_target,))
+              .shuffle(len(X_target))
+              .repeat()
+              .batch(half_batch_size, drop_remainder=True)
+        )
+        
+        dataset = (
+            tf.data.Dataset
+              .zip((source_dataset, target_dataset))
+              .shuffle(buffer_size=steps_per_epoch)
+              .prefetch(tf.data.AUTOTUNE)
+        )
 
-        if not self.model:
-            inputs = self.feature_extractor.input
-            features = self.feature_extractor(inputs)
-            class_labels = self.classifier(features)
+        # Build discriminator
+        input_shape = self.feature_extractor.output_shape[1]
+        inputs = Input(shape=(input_shape,), name="features")
+        self.grl_layer = GradientReversalLayer()
+        grl = self.grl_layer(inputs)
+        for i, nodes in enumerate(self.grl_hidden_layers):
+            grl = Dense(nodes, activation=self.activation, name=f"dense_{i}")(grl)
+        output = Dense(1, activation="sigmoid", name="discriminator")(grl)
+        self.discriminator = Model(inputs, output, name="Discriminator")
 
-            self.grl_layer = GradientReversalLayer()
-            grl = self.grl_layer(features)
-            if self.grl_layer_size:
-                grl = Dense(self.grl_layer_size, activation="relu")(grl)
-            domain_labels = Dense(1, activation="sigmoid", name="discriminator")(grl)
+        # Define DANN model
+        self.model = Model(
+            inputs=self.feature_extractor.input,
+            outputs=self.classifier(self.feature_extractor.output)
+        )
+        self.model.compile(loss = self.classification_loss)
 
-            self.model = Model(inputs=inputs, outputs={
-                "classifier": class_labels,
-                "discriminator": domain_labels
-            })
-
-            self.model.compile(
-                loss={"classifier": self.classification_loss, "discriminator": "binary_crossentropy"},
-                optimizer=self.optimizer,
-            )
-
+        # Update model information
         self._update_info(
             target_level=target_level,
             model_outputs = source_ss.sources.T.groupby(target_level, sort=False).sum().T.columns.values.tolist(),
             normalization=source_ss.spectra_state,
         )
 
-        es = EarlyStopping(
-            monitor=es_monitor,
-            patience=patience,
-            verbose=es_verbose,
-            restore_best_weights=True,
-            mode=es_mode,
-        )
-        vc = ValidationCallback(self, validation_ss, target_level, batch_size)
-        if callbacks:
-            callbacks.append(vc)
-        else:
-            callbacks = [vc]
-        if self.gamma > 0:
-            lambda_scheduler = LambdaScheduler(gamma=self.gamma, total_epochs=epochs, grl_layer=self.grl_layer)
-            callbacks.append(lambda_scheduler)
-        else:
-            tf.keras.backend.set_value(self.grl_layer.lmbda, self.lmbda)
-        callbacks.append(es)
-
+        # Training loop
+        self.history = {"total_loss": [], "class_loss": [], "domain_loss": [], "src_val_loss": [], "tgt_val_loss": []}
+        best_val_loss = np.inf
+        best_weights = None
         t0 = time()
-        history = self.model.fit(
-            combined_dataset,
-            epochs=epochs,
-            verbose=verbose,
-            callbacks=callbacks,
-        )
-        self.history = history.history
-        self.history["training_time"] = time() - t0
 
-        return history
+        it = iter(dataset)
+        for epoch in range(epochs):
+            if verbose:
+                print(f"Epoch {epoch+1}/{epochs}")
+                t1 = time()
+
+            if self.gamma > 0:
+                p = epoch / float(epochs)
+                new_lmbda = 2.0 / (1.0 + np.exp(-self.gamma * p)) - 1.0
+            else:
+                new_lmbda = self.lmbda
+            tf.keras.backend.set_value(self.grl_layer.lmbda, new_lmbda)
+
+            total_loss_avg = tf.metrics.Mean()
+            class_loss_avg = tf.metrics.Mean()
+            domain_loss_avg = tf.metrics.Mean()
+            for step in range(steps_per_epoch):
+                (x_s, y_s), x_t = next(it)
+                domain_loss = self.train_discriminator_step(x_s, x_t)
+                total_loss, class_loss = self.train_feature_extractor_step(x_s, y_s, x_t)
+                total_loss_avg.update_state(total_loss)
+                class_loss_avg.update_state(class_loss)
+                domain_loss_avg.update_state(domain_loss)
+
+            src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
+            tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
+
+            total_loss = float(total_loss_avg.result())
+            class_loss = float(class_loss_avg.result())
+            domain_loss = float(domain_loss_avg.result())
+            
+            self.history["total_loss"].append(total_loss)
+            self.history["class_loss"].append(class_loss)
+            self.history["domain_loss"].append(domain_loss)
+            self.history["src_val_loss"].append(src_val_loss)
+            self.history["tgt_val_loss"].append(tgt_val_loss)
+        
+            # save best model weights based on validation score
+            if tgt_val_loss < best_val_loss:
+                best_val_loss = tgt_val_loss
+                best_weights = self.model.get_weights()
+
+            if verbose:
+                print(f"Finished in {time()-t1:.0f} seconds")
+                print("  "
+                      f"total_loss: {total_loss:.3g} - "
+                      f"class_loss: {class_loss:.3g} - "
+                      f"domain_loss: {domain_loss:.3g} - "
+                      f"src_val_loss: {src_val_loss:.3g} - "
+                      f"tgt_val_loss: {tgt_val_loss:.3g}")
+
+        self.history["training_time"] = time() - t0
+        if best_weights is not None:
+            self.model.set_weights(best_weights)
+
+        return self.history
 
     def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
         """Classify the spectra in the provided `SampleSet`(s).
@@ -240,7 +249,7 @@ class DANN(PyRIIDModel):
         else:
             X = x_test
 
-        results = self.model.predict(X, batch_size=batch_size)["classifier"]
+        results = self.model.predict(X, batch_size=batch_size)
 
         col_level_idx = SampleSet.SOURCES_MULTI_INDEX_NAMES.index(self.target_level)
         col_level_subset = SampleSet.SOURCES_MULTI_INDEX_NAMES[:col_level_idx+1]
@@ -254,40 +263,53 @@ class DANN(PyRIIDModel):
 
         ss.classified_by = self.model_id
 
-    def calc_APE_score(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction APE score on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        ape = APE_score(y_true, y_pred).numpy()
-        return ape
+    @tf.function
+    def train_discriminator_step(self, x_s, x_t):
+        with tf.GradientTape() as tape:
+            # extract features
+            f_s = self.feature_extractor(x_s, training=False)
+            f_t = self.feature_extractor(x_t, training=False)
 
-    def calc_cosine_similarity(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculate the prediction cosine similarity score on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        cosine_sim = cosine_similarity(y_true, y_pred)
-        cosine_score = -tf.reduce_mean(cosine_sim).numpy()
-        return cosine_score
+            # run through discriminator branch
+            d_s = self.discriminator(f_s, training=True)
+            d_t = self.discriminator(f_t, training=True)
 
-    def calc_loss(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
-        """Calculates the label predictor loss on ss"""
-        self.predict(ss, batch_size=batch_size)
-        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
-        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
-        loss = self.model.loss["classifier"](y_true, y_pred).numpy()
-        return loss
+            # source/target domain labels
+            y_s = tf.zeros_like(d_s)
+            y_t = tf.ones_like(d_t)
 
-    def calc_domain_accuracy(self, ss: SampleSet, domain_label: int, batch_size: int = 1000):
-        """Calculate the domain classification accuracy on ss"""
-        x_test = ss.get_samples().astype(float)
-        preds = self.model.predict(x_test, batch_size=batch_size)
-        domain_preds = np.round(preds["discriminator"]).astype(int).flatten()
-        domain_labels = np.full(shape=(len(x_test),), fill_value=domain_label, dtype=int)
-        accuracy = accuracy_score(domain_labels, domain_preds)
-        return accuracy
+            # binary‐crossentropy on both source and target
+            loss_s = self.discriminator_loss(y_s, d_s)
+            loss_t = self.discriminator_loss(y_t, d_t)
+            domain_loss = loss_s + loss_t
 
+        # gradients only on the discriminator’s weights
+        grads = tape.gradient(domain_loss, self.discriminator.trainable_variables)
+        self.d_optimizer.apply_gradients(zip(grads, self.discriminator.trainable_variables))
+        return domain_loss
+
+    @tf.function
+    def train_feature_extractor_step(self, x_s, y_s, x_t):
+        with tf.GradientTape() as tape:
+            # class loss
+            f_s = self.feature_extractor(x_s, training=True)
+            preds = self.classifier(f_s, training=True)
+            class_loss = self.classification_loss(y_s, preds)
+
+            # adversarial loss
+            f_t = self.feature_extractor(x_t, training=True)
+            d_pred_t = self.discriminator(f_t, training=False)
+            # “fake” label = 0 (we want D to predict “source” on target features)
+            fake_labels = tf.zeros_like(d_pred_t)
+            adv_loss = self.discriminator_loss(fake_labels, d_pred_t)
+
+            total_loss = class_loss + self.grl_layer.lmbda * adv_loss
+
+        # gradients on feature_extractor + classifier only
+        variables = self.feature_extractor.trainable_variables + self.classifier.trainable_variables
+        grads = tape.gradient(total_loss, variables)
+        self.f_optimizer.apply_gradients(zip(grads, variables))
+        return total_loss, class_loss
 
 class GradientReversalLayer(Layer):
     def __init__(self, **kwargs):
@@ -301,32 +323,3 @@ class GradientReversalLayer(Layer):
                 return -self.lmbda * dy
             return x, grad
         return _reverse_gradient(inputs)
-
-
-class LambdaScheduler(tf.keras.callbacks.Callback):
-    def __init__(self, gamma, total_epochs, grl_layer):
-        super().__init__()
-        self.gamma = gamma
-        self.total_epochs = total_epochs
-        self.grl_layer = grl_layer
-
-    def on_epoch_begin(self, epoch, logs=None):
-        p = epoch / self.total_epochs
-        new_lmbda = 2 / (1 + np.exp(-self.gamma * p)) - 1
-        tf.keras.backend.set_value(self.grl_layer.lmbda, new_lmbda)
-
-
-class ValidationCallback(tf.keras.callbacks.Callback):
-    def __init__(self, DANN_instance, validation_ss, target_level="Isotope", batch_size: int = 1000):
-        super().__init__()
-        self.DANN_instance = DANN_instance
-        self.validation_ss = validation_ss
-        self.target_level = target_level
-        self.batch_size = batch_size
-
-    def on_epoch_end(self, epoch, logs=None):
-        if logs is None:
-            logs = {}
-
-        ape_score = self.DANN_instance.calc_APE_score(self.validation_ss, target_level=self.target_level, batch_size=self.batch_size)
-        logs["val_ape_score"] = ape_score

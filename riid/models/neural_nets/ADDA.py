@@ -7,7 +7,7 @@ from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
-from riid import SampleSet, SpectraType, SpectraState, read_hdf
+from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
 from sklearn.metrics import accuracy_score, pairwise_distances
 from time import perf_counter as time
@@ -27,11 +27,12 @@ class ADDA(PyRIIDModel):
         """
         super().__init__()
 
-        self.activation = activation
-        self.d_optimizer = d_optimizer
-        self.t_optimizer = t_optimizer
+        self.activation = activation or "relu"
+        self.d_optimizer = d_optimizer or Adam(learning_rate=0.001)
+        self.t_optimizer = t_optimizer or Adam(learning_rate=0.001)
         self.discriminator_hidden_layers = discriminator_hidden_layers
-        self.discriminator_loss = BinaryCrossentropy(label_smoothing=0.1) # soft labels
+        self.discriminator_loss = BinaryCrossentropy()
+        #self.discriminator_loss = BinaryCrossentropy(label_smoothing=0.1) # soft labels
 
         if source_model is not None:
             self.classification_loss = source_model.loss
@@ -70,16 +71,6 @@ class ADDA(PyRIIDModel):
             self.target_encoder.set_weights(self.source_encoder.get_weights())
         else:
             print("WARNING: no pretrained source model was provided")
-            
-        if self.activation is None:
-            self.activation = "relu"
-        if self.d_optimizer is None:
-            self.d_optimizer = Adam(learning_rate=0.001)
-        if self.t_optimizer is None:
-            self.t_optimizer = Adam(learning_rate=0.001)
-
-        self.discriminator = None
-        self.model = None
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
             batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
@@ -134,50 +125,61 @@ class ADDA(PyRIIDModel):
         domain_target = np.ones(len(X_target)).reshape(-1, 1)
         domain_src_val = np.zeros(len(X_src_val)).reshape(-1, 1)
         domain_tgt_val = np.ones(len(X_tgt_val)).reshape(-1, 1)
-        domain_val = tf.concat([domain_src_val, domain_tgt_val], axis=0)
 
         # Make datasets
-        n_s = len(X_source) // batch_size
-        n_t = len(X_target) // batch_size
+        half_batch_size = batch_size // 2
+        steps_per_epoch = max(
+            len(X_source) // half_batch_size,
+            len(X_target) // half_batch_size
+        )
         
-        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, domain_source))
-        target_dataset = tf.data.Dataset.from_tensor_slices((X_target, domain_target))
-
-        if n_s < n_t:
-            source_dataset = source_dataset.repeat().shuffle(len(X_source)).batch(batch_size)
-            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
-        elif n_t < n_s:
-            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
-            target_dataset = target_dataset.repeat().shuffle(len(X_target)).batch(batch_size)
-        else:
-            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
-            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
+        source_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_source, domain_source))
+              .shuffle(len(X_source))
+              .repeat()
+              .batch(half_batch_size, drop_remainder=True)
+        )
+        
+        target_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_target, domain_target))
+              .shuffle(len(X_target))
+              .repeat()
+              .batch(half_batch_size, drop_remainder=True)
+        )
+        
+        dataset = (
+            tf.data.Dataset
+              .zip((source_dataset, target_dataset))
+              .shuffle(buffer_size=steps_per_epoch)
+              .prefetch(tf.data.AUTOTUNE)
+        )
 
         ### Build discriminator
-        if not self.discriminator:
-            input_shape = self.source_encoder.output_shape[1]
-            # inputs = Input(shape=(input_shape,), name="features")
-            # x = inputs
-            # for layer, nodes in enumerate(self.discriminator_hidden_layers):
-            #     x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
-            # output = Dense(1, activation="sigmoid", name="discriminator")(x)
-            # self.discriminator = Model(inputs, output)
+        input_shape = self.source_encoder.output_shape[1]
+        inputs = Input(shape=(input_shape,), name="features")
+        x = inputs
+        for layer, nodes in enumerate(self.discriminator_hidden_layers):
+            x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
+        output = Dense(1, activation="sigmoid", name="discriminator")(x)
+        self.discriminator = Model(inputs, output)
 
-            ### This is what they do in the ADDA paper
-            from tensorflow.keras.layers import LeakyReLU, Dropout
-            init = RandomNormal(mean=0.0, stddev=0.02)
-            inputs = Input(shape=(input_shape,), name="features")
-            x = inputs
-            
-            for i, nodes in enumerate(self.discriminator_hidden_layers):
-                x = Dense(nodes, kernel_initializer=init, name=f"dense_{i}")(x)
-                x = LeakyReLU(negative_slope=0.2, name=f"leakyrelu_{i}")(x)
-                x = Dropout(0.3, name=f"dropout_{i}")(x)
-            
-            output = Dense(1, activation="sigmoid", kernel_initializer=init, name="discriminator")(x)
-            ###
-            
-            self.discriminator = Model(inputs, output, name="Discriminator")
+        ### This is what they do in the ADDA paper
+        # from tensorflow.keras.layers import LeakyReLU, Dropout
+        # init = RandomNormal(mean=0.0, stddev=0.02)
+        # inputs = Input(shape=(input_shape,), name="features")
+        # x = inputs
+        
+        # for i, nodes in enumerate(self.discriminator_hidden_layers):
+        #     x = Dense(nodes, kernel_initializer=init, name=f"dense_{i}")(x)
+        #     x = LeakyReLU(negative_slope=0.2, name=f"leakyrelu_{i}")(x)
+        #     x = Dropout(0.3, name=f"dropout_{i}")(x)
+        
+        # output = Dense(1, activation="sigmoid", kernel_initializer=init, name="discriminator")(x)
+        ###
+        
+        self.discriminator = Model(inputs, output, name="Discriminator")
 
         # Define ADDA model using target encoder and source classifier
         self.model = Model(
@@ -193,31 +195,45 @@ class ADDA(PyRIIDModel):
         )
 
         # Training loop
-        self.history = {"d_loss": [], "t_loss": [], "tgt_val_loss": [], "d_val_loss": []}
+        self.history = {"d_loss": [], "t_loss": [], "src_val_loss": [], "tgt_val_loss": [], "d_val_loss": []}
 
         best_val_loss = np.inf
         best_weights = None
         t0 = time()
+
+        it = iter(dataset)
         for epoch in range(epochs):
             if verbose:
                 print(f"Epoch {epoch+1}/{epochs}")
                 t1 = time()
 
-            for (x_s, y_s), (x_t, y_t) in zip(source_dataset, target_dataset):
+            d_loss_avg = tf.metrics.Mean()
+            t_loss_avg = tf.metrics.Mean()
+            for step in range(steps_per_epoch):
+                (x_s, y_s), (x_t, y_t) = next(it)
                 d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
                 t_loss = self.train_target_encoder_step(x_t)
+                d_loss_avg.update_state(d_loss)
+                t_loss_avg.update_state(t_loss)
 
+            src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
             tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
 
-            f_s_val = self.source_encoder.predict(X_src_val, batch_size=batch_size)
-            f_t_val = self.target_encoder.predict(X_tgt_val, batch_size=batch_size)
+            f_src_val = self.source_encoder.predict(X_src_val, batch_size=batch_size)
+            f_tgt_val = self.target_encoder.predict(X_tgt_val, batch_size=batch_size)
 
-            f_s = tf.concat([f_s_val, f_t_val], axis=0)
-            pred = self.discriminator(f_s, training=False)
-            d_val_loss = self.discriminator_loss(domain_val, pred).numpy()
+            domain_val = tf.concat([domain_src_val, domain_tgt_val], axis=0)
+            f_val = tf.concat([f_src_val, f_tgt_val], axis=0)
+            pred_val = self.discriminator(f_val, training=False)
+            
+            d_val_loss = self.discriminator_loss(domain_val, pred_val).numpy()
 
-            self.history["d_loss"].append(float(d_loss))
-            self.history["t_loss"].append(float(t_loss))
+            d_loss = float(d_loss_avg.result())
+            t_loss = float(t_loss_avg.result())
+
+            self.history["d_loss"].append(d_loss)
+            self.history["t_loss"].append(t_loss)
+            self.history["src_val_loss"].append(src_val_loss)
             self.history["tgt_val_loss"].append(tgt_val_loss)
             self.history["d_val_loss"].append(d_val_loss)
         
@@ -231,6 +247,7 @@ class ADDA(PyRIIDModel):
                 print("  "
                       f"d_loss: {d_loss:.3g} - "
                       f"t_loss: {t_loss:.3g} - "
+                      f"src_val_loss: {src_val_loss:.3g} - "
                       f"tgt_val_loss: {tgt_val_loss:.3g} - "
                       f"d_val_loss: {d_val_loss:.3g}")
 
@@ -270,22 +287,6 @@ class ADDA(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
-
-    @staticmethod
-    def coral_loss(source_features, target_features):
-        """
-        Computes CORAL loss between source and target features.
-        Both are [batch_size, feature_dim] Tensors.
-        """
-        s_mean = tf.reduce_mean(source_features, axis=0, keepdims=True)
-        t_mean = tf.reduce_mean(target_features, axis=0, keepdims=True)
-        s_centered = source_features - s_mean
-        t_centered = target_features - t_mean
-
-        cov_source = tf.matmul(tf.transpose(s_centered), s_centered)
-        cov_target = tf.matmul(tf.transpose(t_centered), t_centered)
-
-        return tf.reduce_mean(tf.square(cov_source - cov_target))
 
     @tf.function
     def train_discriminator_step(self, x_s, x_t, y_s, y_t):

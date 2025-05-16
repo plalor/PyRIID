@@ -1,12 +1,11 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input
-from tensorflow.keras.losses import cosine_similarity
-from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dropout, Activation
+from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
-from riid import SampleSet, SpectraType, SpectraState, read_hdf
+from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
 from time import perf_counter as time
 
@@ -26,7 +25,7 @@ class DeepJDOT(PyRIIDModel):
             jdot_beta: Weight for the classification loss term in the cost matrix.
         """
         super().__init__()
-        self.optimizer = optimizer
+        self.optimizer = optimizer or Adam(learning_rate=0.001)
         self.ot_weight = ot_weight
         self.sinkhorn_reg = sinkhorn_reg
         self.num_sinkhorn_iters = num_sinkhorn_iters
@@ -64,11 +63,6 @@ class DeepJDOT(PyRIIDModel):
             self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
         else:
             print("WARNING: no pretrained source model was provided")
-
-        if self.optimizer is None:
-            self.optimizer = Adam(learning_rate=0.001)
-
-        self.model = None
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
             batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
@@ -118,22 +112,64 @@ class DeepJDOT(PyRIIDModel):
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
 
-        # Make datasets
-        n_s = len(X_source) // batch_size
-        n_t = len(X_target) // batch_size
-        
-        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, domain_source))
-        target_dataset = tf.data.Dataset.from_tensor_slices((X_target, domain_target))
+        Y_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
 
-        if n_s < n_t:
-            source_dataset = source_dataset.repeat().shuffle(len(X_source)).batch(batch_size)
-            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
-        elif n_t < n_s:
-            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
-            target_dataset = target_dataset.repeat().shuffle(len(X_target)).batch(batch_size)
-        else:
-            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
-            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
+        # Make datasets
+        half_batch_size = batch_size // 2
+        steps_per_epoch = max(
+            len(X_source) // half_batch_size,
+            len(X_target) // half_batch_size
+        )
+        
+        source_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_source, Y_source))
+              .shuffle(len(X_source))
+              .repeat()
+              .batch(half_batch_size, drop_remainder=True)
+        )
+        
+        target_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_target,))
+              .shuffle(len(X_target))
+              .repeat()
+              .batch(half_batch_size, drop_remainder=True)
+        )
+        
+        dataset = (
+            tf.data.Dataset
+              .zip((source_dataset, target_dataset))
+              .shuffle(buffer_size=steps_per_epoch)
+              .prefetch(tf.data.AUTOTUNE)
+        )
+
+        # Make validation dataset
+        steps_per_epoch_val = max(
+            len(X_src_val) // half_batch_size,
+            len(X_tgt_val) // half_batch_size
+        )
+        
+        src_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_src_val, Y_src_val))
+              .repeat()
+              .batch(half_batch_size)
+        )
+        
+        tgt_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_tgt_val,))
+              .repeat()
+              .batch(half_batch_size)
+        )
+        
+        val_dataset = (
+            tf.data.Dataset
+              .zip((src_val_dataset, tgt_val_dataset))
+              .shuffle(buffer_size=steps_per_epoch_val)
+              .prefetch(tf.data.AUTOTUNE)
+        )
 
         # Define DeepJDOT model
         self.model = Model(
@@ -150,11 +186,13 @@ class DeepJDOT(PyRIIDModel):
         )
 
         # Training loop
-        self.history = {"class_loss": [], "total_loss": [], "ot_loss": [], "tgt_val_loss": [], "ot_val_loss": []}
+        self.history = {"total_loss": [], "class_loss": [], "ot_loss": [], "src_val_loss": [], "tgt_val_loss": [], "ot_val_loss": []}
         best_val_loss = np.inf
         best_weights = None
         t0 = time()
 
+        it = iter(dataset)
+        it_val = iter(val_dataset)
         for epoch in range(epochs):
             if verbose:
                 print(f"Epoch {epoch+1}/{epochs}")
@@ -163,20 +201,31 @@ class DeepJDOT(PyRIIDModel):
             total_loss_avg = tf.metrics.Mean()
             class_loss_avg = tf.metrics.Mean()
             ot_loss_avg = tf.metrics.Mean()
-
-            for (x_s, y_s), x_t in zip(source_dataset, target_dataset):
+            for step in range(steps_per_epoch):
+                (x_s, y_s), x_t = next(it)
                 total_loss, class_loss, ot_loss = self.train_step(x_s, y_s, x_t)
                 total_loss_avg.update_state(total_loss)
                 class_loss_avg.update_state(class_loss)
                 ot_loss_avg.update_state(ot_loss)
 
+            src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
             tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
 
-            ot_val_loss = xxx
-            
-            self.history["class_loss"].append(float(class_loss_avg.result()))
-            self.history["total_loss"].append(float(total_loss_avg.result()))
-            self.history["ot_loss"].append(float(ot_loss_avg.result()))
+            ot_val_loss_avg = tf.metrics.Mean()
+            for step in range(steps_per_epoch_val):
+                (x_s_val, y_s_val), x_t_val = next(it_val)
+                total_loss, class_loss, ot_loss = self.compute_losses(x_s_val, y_s_val, x_t_val, training=False)
+                ot_val_loss_avg.update_state(ot_loss)
+
+            total_loss = float(total_loss_avg.result())
+            class_loss = float(class_loss_avg.result())
+            ot_loss = float(ot_loss_avg.result())
+            ot_val_loss = float(ot_val_loss_avg.result())
+
+            self.history["total_loss"].append(total_loss)
+            self.history["class_loss"].append(class_loss)
+            self.history["ot_loss"].append(ot_loss)
+            self.history["src_val_loss"].append(src_val_loss)
             self.history["tgt_val_loss"].append(tgt_val_loss)
             self.history["ot_val_loss"].append(ot_val_loss)
 
@@ -188,11 +237,12 @@ class DeepJDOT(PyRIIDModel):
             if verbose:
                 print(f"Finished in {time()-t1:.0f} seconds")
                 print("  "
-                      f"total_loss: {total_loss_avg.result():.4f} - "
-                      f"class_loss: {class_loss_avg.result():.4f} - "
-                      f"ot_loss: {ot_loss_avg.result():.4f} - "
-                      f"tgt_val_loss: {tgt_val_loss:.4f} - "
-                      f"ot_val_loss: {ot_val_loss:.4f}")
+                      f"total_loss: {total_loss_avg.result():.3g} - "
+                      f"class_loss: {class_loss_avg.result():.3g} - "
+                      f"ot_loss: {ot_loss_avg.result():.3g} - "
+                      f"src_val_loss: {src_val_loss:.3g} - "
+                      f"tgt_val_loss: {tgt_val_loss:.3g} - "
+                      f"ot_val_loss: {ot_val_loss:.3g}")
 
         self.history["training_time"] = time() - t0
         if best_weights is not None:
@@ -281,11 +331,39 @@ class DeepJDOT(PyRIIDModel):
         v = tf.ones_like(b)
 
         for _ in range(num_iters):
-            u = a / (tf.linalg.matvec(K, v) + 1e-8)
-            v = b / (tf.linalg.matvec(tf.transpose(K), u) + 1e-8)
+            u = a / (tf.reduce_sum(K * tf.expand_dims(v, 0), axis=1) + 1e-8)
+            v = b / (tf.reduce_sum(tf.transpose(K) * tf.expand_dims(u, 0), axis=1) + 1e-8)
 
         gamma = tf.expand_dims(u, 1) * K * tf.expand_dims(v, 0)
         return gamma
+
+    @tf.function
+    def compute_losses(self, x_s, y_s, x_t, training):
+        # 1) forward passes
+        f_s = self.feature_extractor(x_s, training=training)
+        p_s = self.classifier(f_s, training=training)
+        f_t = self.feature_extractor(x_t, training=training)
+        p_t = self.classifier(f_t, training=training)
+
+        # 2) classification loss on source
+        class_loss = self.classification_loss(y_s, p_s)
+
+        # 3) build cost matrix
+        feat_dist  = self.pairwise_squared_distance(f_s, f_t)
+        cls_matrix = self.pairwise_classification_loss(y_s, p_t)
+        M = self.jdot_alpha * feat_dist + self.jdot_beta * cls_matrix
+
+        # 4) OT coupling
+        n = tf.shape(x_s)[0]; m = tf.shape(x_t)[0]
+        a = tf.fill([n], 1.0/tf.cast(n,tf.float32))
+        b = tf.fill([m], 1.0/tf.cast(m,tf.float32))
+        gamma = self.sinkhorn(a, b, M, self.sinkhorn_reg, self.num_sinkhorn_iters)
+
+        # 5) OT loss + total
+        ot_loss    = tf.reduce_sum(gamma * M)
+        total_loss = class_loss + self.ot_weight * ot_loss
+
+        return total_loss, class_loss, ot_loss
 
     @tf.function
     def train_step(self, x_s, y_s, x_t):
@@ -298,36 +376,8 @@ class DeepJDOT(PyRIIDModel):
           - Compute the OT loss and add it to the source classification loss.
         """
         with tf.GradientTape() as tape:
-            # Forward pass on source
-            f_s = self.feature_extractor(x_s, training=True)
-            p_s = self.classifier(f_s, training=True)
-            source_class_loss = self.classification_loss(y_s, p_s)
-
-            # Forward pass on target
-            f_t = self.feature_extractor(x_t, training=True)
-            p_t = self.classifier(f_t, training=True)
-
-            # Cost matrix: feature distance + classification loss term
-            feat_distance = self.pairwise_squared_distance(f_s, f_t)
-            cls_loss_matrix = self.pairwise_classification_loss(y_s, p_t)
-            cost_matrix = self.jdot_alpha * feat_distance + self.jdot_beta * cls_loss_matrix
-
-            # Define uniform marginals over the source and target batches
-            n = tf.cast(tf.shape(x_s)[0], tf.float32)
-            m = tf.cast(tf.shape(x_t)[0], tf.float32)
-            a = tf.fill([tf.shape(x_s)[0]], 1.0 / n)
-            b = tf.fill([tf.shape(x_t)[0]], 1.0 / m)
-
-            # Compute the OT coupling using Sinkhorn iterations
-            gamma = self.sinkhorn(a, b, cost_matrix, self.sinkhorn_reg, self.num_sinkhorn_iters)
-
-            # OT loss is the inner product between the coupling and cost matrix
-            ot_loss = tf.reduce_sum(gamma * cost_matrix)
-
-            # Total loss: source classification loss + weighted OT loss
-            total_loss = source_class_loss + self.ot_weight * ot_loss
-
-        grads = tape.gradient(total_loss, self.source_model.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.source_model.trainable_variables))
-        return total_loss, source_class_loss, ot_loss
+            total_loss, class_loss, ot_loss = self.compute_losses(x_s, y_s, x_t, training=True)
+        grads = tape.gradient(total_loss, self.model.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        return total_loss, class_loss, ot_loss
         

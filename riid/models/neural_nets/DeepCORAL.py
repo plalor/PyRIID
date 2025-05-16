@@ -2,11 +2,10 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.layers import Input, Dropout, Activation
-from tensorflow.keras.losses import cosine_similarity
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
-from riid import SampleSet, SpectraType, SpectraState, read_hdf
+from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
 from time import perf_counter as time
 
@@ -22,7 +21,7 @@ class DeepCORAL(PyRIIDModel):
         """
         super().__init__()
 
-        self.optimizer = optimizer
+        self.optimizer = optimizer or Adam(learning_rate=0.001)
         self.lmbda = lmbda
 
         if source_model is not None:
@@ -56,11 +55,6 @@ class DeepCORAL(PyRIIDModel):
             self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
         else:
             print("WARNING: no pretrained source model was provided")
-
-        if self.optimizer is None:
-            self.optimizer = Adam(learning_rate=0.001)
-
-        self.model = None
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
             batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
@@ -111,21 +105,34 @@ class DeepCORAL(PyRIIDModel):
         Y_source = source_contributions_df.values.astype("float32")
 
         # Make datasets
-        n_s = len(X_source) // batch_size
-        n_t = len(X_target) // batch_size
+        half_batch_size = batch_size // 2
+        steps_per_epoch = max(
+            len(X_source) // half_batch_size,
+            len(X_target) // half_batch_size
+        )
         
-        source_dataset = tf.data.Dataset.from_tensor_slices((X_source, Y_source))
-        target_dataset = tf.data.Dataset.from_tensor_slices((X_target))
-
-        if n_s < n_t:
-            source_dataset = source_dataset.repeat().shuffle(len(X_source)).batch(batch_size)
-            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
-        elif n_t < n_s:
-            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
-            target_dataset = target_dataset.repeat().shuffle(len(X_target)).batch(batch_size)
-        else:
-            source_dataset = source_dataset.shuffle(len(X_source)).batch(batch_size)
-            target_dataset = target_dataset.shuffle(len(X_target)).batch(batch_size)
+        source_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_source, Y_source))
+              .shuffle(len(X_source))
+              .repeat()
+              .batch(half_batch_size, drop_remainder=True)
+        )
+        
+        target_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_target,))
+              .shuffle(len(X_target))
+              .repeat()
+              .batch(half_batch_size, drop_remainder=True)
+        )
+        
+        dataset = (
+            tf.data.Dataset
+              .zip((source_dataset, target_dataset))
+              .shuffle(buffer_size=steps_per_epoch)
+              .prefetch(tf.data.AUTOTUNE)
+        )
 
         # Define CORAL model
         self.model = Model(
@@ -142,10 +149,12 @@ class DeepCORAL(PyRIIDModel):
         )
 
         # Training loop
-        self.history = {"class_loss": [], "total_loss": [], "coral_loss": [], "tgt_val_loss": [], "coral_val_loss": []}
+        self.history = {"total_loss": [], "class_loss": [], "coral_loss": [], "src_val_loss": [], "tgt_val_loss": [], "coral_val_loss": []}
         best_val_loss = np.inf
         best_weights = None
         t0 = time()
+
+        it = iter(dataset)
         for epoch in range(epochs):
             if verbose:
                 print(f"Epoch {epoch+1}/{epochs}")
@@ -154,22 +163,28 @@ class DeepCORAL(PyRIIDModel):
             total_loss_avg = tf.metrics.Mean()
             class_loss_avg = tf.metrics.Mean()
             coral_loss_avg = tf.metrics.Mean()
-
-            for (x_s, y_s), x_t in zip(source_dataset, target_dataset):
+            for step in range(steps_per_epoch):
+                (x_s, y_s), x_t = next(it)
                 total_loss, class_loss, coral_val = self.train_step(x_s, y_s, x_t)
                 total_loss_avg.update_state(total_loss)
                 class_loss_avg.update_state(class_loss)
                 coral_loss_avg.update_state(coral_val)
 
+            src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
             tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
 
             f_s_val = self.feature_extractor(X_src_val, training=False)
             f_t_val = self.feature_extractor(X_tgt_val, training=False)
             coral_val_loss = self.coral_loss(f_s_val, f_t_val).numpy()
 
-            self.history["class_loss"].append(float(class_loss_avg.result()))
-            self.history["total_loss"].append(float(total_loss_avg.result()))
-            self.history["coral_loss"].append(float(coral_loss_avg.result()))
+            total_loss = float(total_loss_avg.result())
+            class_loss = float(class_loss_avg.result())
+            coral_loss = float(coral_loss_avg.result())
+
+            self.history["total_loss"].append(total_loss)
+            self.history["class_loss"].append(class_loss)
+            self.history["coral_loss"].append(coral_loss)
+            self.history["src_val_loss"].append(src_val_loss)
             self.history["tgt_val_loss"].append(tgt_val_loss)
             self.history["coral_val_loss"].append(coral_val_loss)
 
@@ -181,9 +196,10 @@ class DeepCORAL(PyRIIDModel):
             if verbose:
                 print(f"Finished in {time()-t1:.0f} seconds")
                 print("  "
-                      f"total_loss: {total_loss_avg.result():.3g} - "
-                      f"class_loss: {class_loss_avg.result():.3g} - "
-                      f"coral_loss: {coral_loss_avg.result():.3g} - "
+                      f"total_loss: {total_loss:.3g} - "
+                      f"class_loss: {class_loss:.3g} - "
+                      f"coral_loss: {coral_loss:.3g} - "
+                      f"src_val_loss: {src_val_loss:.3g} - "
                       f"tgt_val_loss: {tgt_val_loss:.3g} - "
                       f"coral_val_loss: {coral_val_loss:.3g}")
 
@@ -254,6 +270,6 @@ class DeepCORAL(PyRIIDModel):
             coral_val = self.coral_loss(f_s, f_t)
             total_loss = class_loss + self.lmbda * coral_val
 
-        grads = tape.gradient(total_loss, self.source_model.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.source_model.trainable_variables))
+        grads = tape.gradient(total_loss, self.model.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
         return total_loss, class_loss, coral_val

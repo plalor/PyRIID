@@ -8,7 +8,7 @@ from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 
-from riid import SampleSet, SpectraType, SpectraState, read_hdf
+from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
 from time import perf_counter as time
 
