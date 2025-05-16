@@ -207,8 +207,8 @@ class ADDA(PyRIIDModel):
                 print(f"Epoch {epoch+1}/{epochs}")
                 t1 = time()
 
-            d_loss_avg = tf.metrics.Mean()
-            t_loss_avg = tf.metrics.Mean()
+            d_loss_avg = tf.keras.metrics.Mean()
+            t_loss_avg = tf.keras.metrics.Mean()
             for step in range(steps_per_epoch):
                 (x_s, y_s), (x_t, y_t) = next(it)
                 d_loss = self.train_discriminator_step(x_s, x_t, y_s, y_t)
@@ -228,8 +228,8 @@ class ADDA(PyRIIDModel):
             
             d_val_loss = self.discriminator_loss(domain_val, pred_val).numpy()
 
-            d_loss = float(d_loss_avg.result())
-            t_loss = float(t_loss_avg.result())
+            d_loss = d_loss_avg.result().numpy()
+            t_loss = t_loss_avg.result().numpy()
 
             self.history["d_loss"].append(d_loss)
             self.history["t_loss"].append(t_loss)

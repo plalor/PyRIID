@@ -113,6 +113,8 @@ class DAN(PyRIIDModel):
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
 
+        Y_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+
         center = self.kernel_num // 2
         self.sigma_list = [
             self.base_sigma * (self.kernel_mul ** (i - center))
@@ -149,6 +151,32 @@ class DAN(PyRIIDModel):
               .prefetch(tf.data.AUTOTUNE)
         )
 
+        # Make validation dataset
+        steps_per_epoch_val = max(
+            len(X_src_val) // half_batch_size,
+            len(X_tgt_val) // half_batch_size
+        )
+        
+        src_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_src_val, Y_src_val))
+              .repeat()
+              .batch(half_batch_size)
+        )
+        
+        tgt_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_tgt_val,))
+              .repeat()
+              .batch(half_batch_size)
+        )
+        
+        val_dataset = (
+            tf.data.Dataset
+              .zip((src_val_dataset, tgt_val_dataset))
+              .prefetch(tf.data.AUTOTUNE)
+        )
+
         # Define DAN model
         self.model = Model(
             inputs=self.feature_extractor.input,
@@ -175,9 +203,9 @@ class DAN(PyRIIDModel):
                 print(f"Epoch {epoch+1}/{epochs}")
                 t1 = time()
 
-            total_loss_avg = tf.metrics.Mean()
-            class_loss_avg = tf.metrics.Mean()
-            mmd_loss_avg = tf.metrics.Mean()
+            total_loss_avg = tf.keras.metrics.Mean()
+            class_loss_avg = tf.keras.metrics.Mean()
+            mmd_loss_avg = tf.keras.metrics.Mean()
 
             for step in range(steps_per_epoch):
                 (x_s, y_s), x_t = next(it)
@@ -189,13 +217,17 @@ class DAN(PyRIIDModel):
             src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
             tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
 
-            f_s_val = self.feature_extractor(X_src_val, training=False)
-            f_t_val = self.feature_extractor(X_tgt_val, training=False)
-            mmd_val_loss = self.mmd_loss(f_s_val, f_t_val).numpy()
+            mmd_val_loss_avg = tf.keras.metrics.Mean()
+            for (x_s_val, _), x_t_val in val_dataset.take(steps_per_epoch_val):
+                f_s_val = self.feature_extractor(x_s_val, training=False)
+                f_t_val = self.feature_extractor(x_t_val, training=False)
+                mmd_val_loss = self.mmd_loss(f_s_val, f_t_val)
+                mmd_val_loss_avg.update_state(mmd_val_loss)
 
-            total_loss = float(total_loss_avg.result())
-            class_loss = float(class_loss_avg.result())
-            mmd_loss = float(mmd_loss_avg.result())
+            total_loss = total_loss_avg.result().numpy()
+            class_loss = class_loss_avg.result().numpy()
+            mmd_loss = mmd_loss_avg.result().numpy()
+            mmd_val_loss = mmd_val_loss_avg.result().numpy()
 
             self.history["total_loss"].append(total_loss)
             self.history["class_loss"].append(class_loss)
@@ -286,7 +318,7 @@ class DAN(PyRIIDModel):
               + tf.reduce_mean(K_tt)
               - 2.0 * tf.reduce_mean(K_st)
             )
-        return mmd_total / float(len(self.sigma_list))
+        return mmd_total / len(self.sigma_list)
 
     @tf.function
     def train_step(self, x_s, y_s, x_t):

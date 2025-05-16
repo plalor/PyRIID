@@ -167,7 +167,6 @@ class DeepJDOT(PyRIIDModel):
         val_dataset = (
             tf.data.Dataset
               .zip((src_val_dataset, tgt_val_dataset))
-              .shuffle(buffer_size=steps_per_epoch_val)
               .prefetch(tf.data.AUTOTUNE)
         )
 
@@ -192,15 +191,14 @@ class DeepJDOT(PyRIIDModel):
         t0 = time()
 
         it = iter(dataset)
-        it_val = iter(val_dataset)
         for epoch in range(epochs):
             if verbose:
                 print(f"Epoch {epoch+1}/{epochs}")
                 t1 = time()
 
-            total_loss_avg = tf.metrics.Mean()
-            class_loss_avg = tf.metrics.Mean()
-            ot_loss_avg = tf.metrics.Mean()
+            total_loss_avg = tf.keras.metrics.Mean()
+            class_loss_avg = tf.keras.metrics.Mean()
+            ot_loss_avg = tf.keras.metrics.Mean()
             for step in range(steps_per_epoch):
                 (x_s, y_s), x_t = next(it)
                 total_loss, class_loss, ot_loss = self.train_step(x_s, y_s, x_t)
@@ -211,16 +209,15 @@ class DeepJDOT(PyRIIDModel):
             src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
             tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
 
-            ot_val_loss_avg = tf.metrics.Mean()
-            for step in range(steps_per_epoch_val):
-                (x_s_val, y_s_val), x_t_val = next(it_val)
+            ot_val_loss_avg = tf.keras.metrics.Mean()
+            for (x_s_val, y_s_val), x_t_val in val_dataset.take(steps_per_epoch_val):
                 total_loss, class_loss, ot_loss = self.compute_losses(x_s_val, y_s_val, x_t_val, training=False)
                 ot_val_loss_avg.update_state(ot_loss)
 
-            total_loss = float(total_loss_avg.result())
-            class_loss = float(class_loss_avg.result())
-            ot_loss = float(ot_loss_avg.result())
-            ot_val_loss = float(ot_val_loss_avg.result())
+            total_loss = total_loss_avg.result().numpy()
+            class_loss = class_loss_avg.result().numpy()
+            ot_loss = ot_loss_avg.result().numpy()
+            ot_val_loss = ot_val_loss_avg.result().numpy()
 
             self.history["total_loss"].append(total_loss)
             self.history["class_loss"].append(class_loss)

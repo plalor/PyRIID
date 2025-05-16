@@ -160,9 +160,9 @@ class DeepCORAL(PyRIIDModel):
                 print(f"Epoch {epoch+1}/{epochs}")
                 t1 = time()
 
-            total_loss_avg = tf.metrics.Mean()
-            class_loss_avg = tf.metrics.Mean()
-            coral_loss_avg = tf.metrics.Mean()
+            total_loss_avg = tf.keras.metrics.Mean()
+            class_loss_avg = tf.keras.metrics.Mean()
+            coral_loss_avg = tf.keras.metrics.Mean()
             for step in range(steps_per_epoch):
                 (x_s, y_s), x_t = next(it)
                 total_loss, class_loss, coral_val = self.train_step(x_s, y_s, x_t)
@@ -177,9 +177,9 @@ class DeepCORAL(PyRIIDModel):
             f_t_val = self.feature_extractor(X_tgt_val, training=False)
             coral_val_loss = self.coral_loss(f_s_val, f_t_val).numpy()
 
-            total_loss = float(total_loss_avg.result())
-            class_loss = float(class_loss_avg.result())
-            coral_loss = float(coral_loss_avg.result())
+            total_loss = total_loss_avg.result().numpy()
+            class_loss = class_loss_avg.result().numpy()
+            coral_loss = coral_loss_avg.result().numpy()
 
             self.history["total_loss"].append(total_loss)
             self.history["class_loss"].append(class_loss)

@@ -182,15 +182,15 @@ class DANN(PyRIIDModel):
                 t1 = time()
 
             if self.gamma > 0:
-                p = epoch / float(epochs)
+                p = epoch / epochs
                 new_lmbda = 2.0 / (1.0 + np.exp(-self.gamma * p)) - 1.0
             else:
                 new_lmbda = self.lmbda
             tf.keras.backend.set_value(self.grl_layer.lmbda, new_lmbda)
 
-            total_loss_avg = tf.metrics.Mean()
-            class_loss_avg = tf.metrics.Mean()
-            domain_loss_avg = tf.metrics.Mean()
+            total_loss_avg = tf.keras.metrics.Mean()
+            class_loss_avg = tf.keras.metrics.Mean()
+            domain_loss_avg = tf.keras.metrics.Mean()
             for step in range(steps_per_epoch):
                 (x_s, y_s), x_t = next(it)
                 domain_loss = self.train_discriminator_step(x_s, x_t)
@@ -202,9 +202,9 @@ class DANN(PyRIIDModel):
             src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
             tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
 
-            total_loss = float(total_loss_avg.result())
-            class_loss = float(class_loss_avg.result())
-            domain_loss = float(domain_loss_avg.result())
+            total_loss = total_loss_avg.result().numpy()
+            class_loss = class_loss_avg.result().numpy()
+            domain_loss = domain_loss_avg.result().numpy()
             
             self.history["total_loss"].append(total_loss)
             self.history["class_loss"].append(class_loss)
