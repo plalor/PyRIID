@@ -108,20 +108,18 @@ class Transformer(PyRIIDModel):
             inputs = Input(shape=(input_shape,), name="Spectrum")
 
             num_patches = (input_shape - self.patch_size) // self.stride + 1
-            x = Lambda(lambda z: tf.signal.frame(
-                    z,
-                    frame_length=self.patch_size,
-                    frame_step=self.stride,
-                    axis=1
-                ),
-                output_shape=(num_patches, self.patch_size),
+
+            x = Lambda(
+                extract_patches,
+                arguments={'patch_size': self.patch_size, 'stride': self.stride},
                 name="extract_patches"
             )(inputs)
             
             x = Dense(self.embed_dim, name="dense_embedding")(x)
 
             pos_indices = Lambda(
-                lambda z: tf.range(num_patches)[tf.newaxis, :],
+                make_positions,
+                arguments={'num_patches': num_patches},
                 name="make_positions"
             )(x)
 
@@ -217,3 +215,17 @@ class Transformer(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
+
+### Need to define patch-extraction and position generation out into module-level functions
+### in order to make Lambda layer's serializable
+def extract_patches(x, patch_size, stride):
+    return tf.signal.frame(
+        x,
+        frame_length=patch_size,
+        frame_step=stride,
+        axis=1
+    )
+
+def make_positions(x, num_patches):
+    # returns shape (batch, num_patches)
+    return tf.range(num_patches)[tf.newaxis, :]
