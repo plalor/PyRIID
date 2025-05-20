@@ -218,6 +218,9 @@ class Transformer(PyRIIDModel):
 
 ### Need to define patch-extraction and position generation out into module-level functions
 ### in order to make Lambda layer's serializable
+from tensorflow.keras.saving import register_keras_serializable
+
+@register_keras_serializable(package='Custom', name='extract_patches')
 def extract_patches(x, patch_size, stride):
     return tf.signal.frame(
         x,
@@ -226,6 +229,7 @@ def extract_patches(x, patch_size, stride):
         axis=1
     )
 
+@register_keras_serializable(package='Custom', name='make_positions')
 def make_positions(x, num_patches):
     # returns shape (batch, num_patches)
     return tf.range(num_patches)[tf.newaxis, :]
