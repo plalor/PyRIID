@@ -35,7 +35,7 @@ class MLP(PyRIIDModel):
         self.activation = activation or "relu"
         self.loss = loss or CategoricalCrossentropy()
         self.optimizer = optimizer or Adam(learning_rate=0.001)
-        self.metrics = metrics or [CategoricalCrossentropy()]
+        self.metrics = metrics
         self.kernel_regularizer = l2(l2_alpha) if l2_alpha else None
         self.activity_regularizer = activity_regularizer
         self.final_activation = final_activation or "softmax"
@@ -46,7 +46,7 @@ class MLP(PyRIIDModel):
         self.model = None
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size: int = 200,
-            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_categorical_crossentropy",
+            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_loss",
             es_mode: str = "min", es_verbose=0, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 

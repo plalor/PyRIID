@@ -3,7 +3,7 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, \
-    MultiHeadAttention, LayerNormalization, GlobalAveragePooling1D
+    MultiHeadAttention, LayerNormalization, Layer
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
@@ -38,7 +38,7 @@ class Transformer(PyRIIDModel):
         self.activation = activation or "relu"
         self.loss = loss or CategoricalCrossentropy()
         self.optimizer = optimizer or Adam(learning_rate=0.001)
-        self.metrics = metrics or [CategoricalCrossentropy()]
+        self.metrics = metrics
         self.final_activation = final_activation or "softmax"
 
         self.embed_dim = embed_dim
@@ -52,7 +52,7 @@ class Transformer(PyRIIDModel):
         self.model = None
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size: int = 200,
-            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_categorical_crossentropy",
+            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_loss",
             es_mode: str = "min", es_verbose=0, target_level="Isotope", verbose: bool = False):
         """Fit a model to the given `SampleSet`(s).
 
@@ -111,7 +111,7 @@ class Transformer(PyRIIDModel):
 
             x = Lambda(
                 extract_patches,
-                arguments={'patch_size': self.patch_size, 'stride': self.stride},
+                arguments={"patch_size": self.patch_size, "stride": self.stride},
                 name="extract_patches"
             )(inputs)
             
@@ -119,7 +119,7 @@ class Transformer(PyRIIDModel):
 
             pos_indices = Lambda(
                 make_positions,
-                arguments={'num_patches': num_patches},
+                arguments={"num_patches": num_patches},
                 name="make_positions"
             )(x)
 
@@ -130,21 +130,30 @@ class Transformer(PyRIIDModel):
             )(pos_indices)
 
             x = Add(name="add_pos")([x, pos_embed])
+            if self.dropout > 0:
+                x = Dropout(self.dropout)(x)
+
+            x = ClassToken(self.embed_dim, name="class_token")(x)
 
             for layer in range(self.num_layers):
-                attention_output = MultiHeadAttention(num_heads=self.num_heads, 
-                                                key_dim=self.embed_dim // self.num_heads,
-                                                name=f"multi_head_attention_{layer}")(x, x)
+                y = LayerNormalization(epsilon=1e-6, name=f"pre_mha_layernorm_{layer}")(x)
+                y = MultiHeadAttention(num_heads=self.num_heads,
+                        key_dim=self.embed_dim // self.num_heads,
+                        name=f"multi_head_attention_{layer}")(y, y)
                 if self.dropout > 0:
-                    attention_output = Dropout(self.dropout, name=f"mha_dropout_{layer}")(attention_output)
-                attention_output = LayerNormalization(epsilon=1e-6, name=f"mha_layernorm_{layer}")(x + attention_output)
-                ffn_output = Dense(self.ff_dim, activation=self.activation, name=f"ffn_dense1_{layer}")(attention_output)
-                ffn_output = Dense(self.embed_dim, name=f"ffn_dense2_{layer}")(ffn_output)
+                    y = Dropout(self.dropout, name=f"mha_dropout_{layer}")(y)
+                x = x + y
+
+                y = LayerNormalization(epsilon=1e-6, name=f"pre_ffn_layernorm_{layer}")(x)
+                y = Dense(self.ff_dim, activation=self.activation, name=f"ffn_dense1_{layer}")(y)
                 if self.dropout > 0:
-                    ffn_output = Dropout(self.dropout, name=f"ffn_dropout_{layer}")(ffn_output)
-                x = LayerNormalization(epsilon=1e-6, name=f"ffn_layernorm_{layer}")(attention_output + ffn_output)
+                    y = Dropout(self.dropout, name=f"ffn_dropout1_{layer}")(y)
+                y = Dense(self.embed_dim, name=f"ffn_dense2_{layer}")(y)
+                if self.dropout > 0:
+                    y = Dropout(self.dropout, name=f"ffn_dropout2_{layer}")(y)
+                x = x + y
             
-            x = GlobalAveragePooling1D(name="global_avg_pool")(x)
+            x = Lambda(lambda t: t[:, 0, :], name="take_cls_token")(x)  # shape (batch, embed_dim)
             if self.dropout > 0:
                 x = Dropout(self.dropout, name="dropout_layer")(x)
 
@@ -216,11 +225,32 @@ class Transformer(PyRIIDModel):
 
         ss.classified_by = self.model_id
 
-### Need to define patch-extraction and position generation out into module-level functions
-### in order to make Lambda layer's serializable
+### Need to decorate with serialization API to save/load model
 from tensorflow.keras.saving import register_keras_serializable
 
-@register_keras_serializable(package='Custom', name='extract_patches')
+@register_keras_serializable(package="Custom", name="ClassToken")
+class ClassToken(Layer):
+    def __init__(self, embed_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.embed_dim = embed_dim
+
+    def build(self, input_shape):
+        # input_shape = (batch, num_patches, embed_dim)
+        self.cls_token = self.add_weight(
+            shape=(1, 1, self.embed_dim),
+            initializer="zeros",
+            trainable=True,
+            name="cls_token"
+        )
+        super().build(input_shape)
+
+    def call(self, x):
+        # x.shape = (batch, num_patches, embed_dim)
+        batch_size = tf.shape(x)[0]
+        cls_tokens = tf.tile(self.cls_token, [batch_size, 1, 1])
+        return tf.concat([cls_tokens, x], axis=1)
+
+@register_keras_serializable(package="Custom", name="extract_patches")
 def extract_patches(x, patch_size, stride):
     return tf.signal.frame(
         x,
@@ -229,7 +259,8 @@ def extract_patches(x, patch_size, stride):
         axis=1
     )
 
-@register_keras_serializable(package='Custom', name='make_positions')
+@register_keras_serializable(package="Custom", name="make_positions")
 def make_positions(x, num_patches):
-    # returns shape (batch, num_patches)
-    return tf.range(num_patches)[tf.newaxis, :]
+    batch = tf.shape(x)[0]
+    idx = tf.range(num_patches)[tf.newaxis, :]
+    return tf.tile(idx, [batch, 1])
