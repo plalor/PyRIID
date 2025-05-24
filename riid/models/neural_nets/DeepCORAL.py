@@ -104,6 +104,8 @@ class DeepCORAL(PyRIIDModel):
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
 
+        Y_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+
         # Make datasets
         half_batch_size = batch_size // 2
         steps_per_epoch = max(
@@ -134,6 +136,32 @@ class DeepCORAL(PyRIIDModel):
               .prefetch(tf.data.AUTOTUNE)
         )
 
+        # Make validation dataset
+        steps_per_epoch_val = max(
+            len(X_src_val) // half_batch_size,
+            len(X_tgt_val) // half_batch_size
+        )
+        
+        src_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_src_val, Y_src_val))
+              .repeat()
+              .batch(half_batch_size)
+        )
+        
+        tgt_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_tgt_val,))
+              .repeat()
+              .batch(half_batch_size)
+        )
+        
+        val_dataset = (
+            tf.data.Dataset
+              .zip((src_val_dataset, tgt_val_dataset))
+              .prefetch(tf.data.AUTOTUNE)
+        )
+        
         # Define CORAL model
         self.model = Model(
             inputs=self.feature_extractor.input,
@@ -173,13 +201,17 @@ class DeepCORAL(PyRIIDModel):
             src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
             tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
 
-            f_s_val = self.feature_extractor(X_src_val, training=False)
-            f_t_val = self.feature_extractor(X_tgt_val, training=False)
-            coral_val_loss = self.coral_loss(f_s_val, f_t_val).numpy()
+            coral_val_loss_avg = tf.keras.metrics.Mean()
+            for (x_s_val, _), x_t_val in val_dataset.take(steps_per_epoch_val):
+                f_s_val = self.feature_extractor(x_s_val, training=False)
+                f_t_val = self.feature_extractor(x_t_val, training=False)
+                coral_val_loss = self.coral_loss(f_s_val, f_t_val)
+                coral_val_loss_avg.update_state(coral_val_loss)
 
             total_loss = total_loss_avg.result().numpy()
             class_loss = class_loss_avg.result().numpy()
             coral_loss = coral_loss_avg.result().numpy()
+            coral_val_loss = coral_val_loss_avg.result().numpy()
 
             self.history["total_loss"].append(total_loss)
             self.history["class_loss"].append(class_loss)
