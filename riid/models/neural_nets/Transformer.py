@@ -3,7 +3,7 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, \
-    MultiHeadAttention, LayerNormalization, Layer
+    MultiHeadAttention, LayerNormalization, Layer, Conv1D
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
@@ -16,7 +16,7 @@ from time import perf_counter as time
 class Transformer(PyRIIDModel):
     """Transformer classifier."""
     def __init__(self, activation=None, loss=None, optimizer=None, metrics=None,
-                 final_activation=None, embed_dim=None, num_heads=None, ff_dim=None,
+                 final_activation=None, embed_mode=None, embed_dim=None, num_heads=None, ff_dim=None,
                  num_layers=None, patch_size=None, stride=None, dropout=0):
         """
         Args:
@@ -25,6 +25,7 @@ class Transformer(PyRIIDModel):
             optimizer: tensorflow optimizer or optimizer name to use for training
             metrics: list of metrics to be evaluating during training
             final_activation: final activation function to apply to model output
+            embed_mode: mode for performing the embedding
             embed_dim: size of the embedding vector
             num_heads: number of attention heads
             ff_dim: dimension of feed-forward network
@@ -41,6 +42,7 @@ class Transformer(PyRIIDModel):
         self.metrics = metrics
         self.final_activation = final_activation or "softmax"
 
+        self.embed_mode = embed_mode or "linear"
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.ff_dim = ff_dim
@@ -105,17 +107,62 @@ class Transformer(PyRIIDModel):
 
         if not self.model:
             input_shape = X_train.shape[1]
-            inputs = Input(shape=(input_shape,), name="Spectrum")
 
-            num_patches = (input_shape - self.patch_size) // self.stride + 1
+            # Patch embedding: slide a window of size `patch_size` (with step `stride`) over the
+            # spectrum and project each patch into an `embed_dim`-dimensional token 
+            if self.embed_mode == "raw":
+                assert self.embed_dim == self.patch_size
 
-            x = Lambda(
-                extract_patches,
-                arguments={"patch_size": self.patch_size, "stride": self.stride},
-                name="extract_patches"
-            )(inputs)
+                inputs = Input(shape=(input_shape,), name="Spectrum")
+                x = Lambda(
+                    extract_patches,
+                    arguments={"patch_size": self.patch_size, "stride": self.stride},
+                    name="patch_projection"
+                )(inputs)
+
+            elif self.embed_mode == "linear":
+                inputs = Input(shape=(input_shape,1), name="Spectrum")
+                x = Conv1D(
+                    filters=self.embed_dim,
+                    kernel_size=self.patch_size,
+                    strides=self.stride,
+                    padding="valid",
+                    use_bias=True,
+                    name="patch_projection"
+                )(inputs)
+                
+            elif self.embed_mode == "nonlinear1":
+                inputs = Input(shape=(input_shape,1), name="Spectrum")
+                x = Conv1D(
+                    filters=self.embed_dim,
+                    kernel_size=self.patch_size,
+                    strides=self.stride,
+                    padding="valid",
+                    use_bias=True,
+                    activation=self.activation,
+                    name="patch_projection"
+                )(inputs)
+                
+            elif self.embed_mode == "nonlinear2":
+                inputs = Input(shape=(input_shape,1), name="Spectrum")
+                x = Conv1D(
+                  filters=self.ff_dim,
+                  kernel_size=self.patch_size,
+                  strides=self.stride,
+                  padding="valid",
+                  activation=self.activation,
+                  name="patch_projection1"
+                )(inputs)
+                x = Conv1D(
+                  filters=self.embed_dim,
+                  kernel_size=1,
+                  activation=self.activation,
+                  name="patch_projection2"
+                )(x)
+            else:
+                raise ValueError("embed_mode must be `raw` or `linear`, `nonlinear1`, or `nonlinear2`")
             
-            x = Dense(self.embed_dim, name="dense_embedding")(x)
+            num_patches = (input_shape - self.patch_size) // self.stride + 1
 
             pos_indices = Lambda(
                 make_positions,
@@ -181,7 +228,7 @@ class Transformer(PyRIIDModel):
             verbose=verbose,
             validation_data=validation_dataset,
             callbacks=callbacks,
-         )
+        )
         self.history = history.history
         self.history["training_time"] = time() - t0
 
