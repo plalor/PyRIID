@@ -199,8 +199,8 @@ class Transformer(PyRIIDModel):
                 if self.dropout > 0:
                     y = Dropout(self.dropout, name=f"ffn_dropout2_{layer}")(y)
                 x = x + y
-            
-            x = Lambda(lambda t: t[:, 0, :], name="take_cls_token")(x)  # shape (batch, embed_dim)
+
+            x = Lambda(take_cls_token_fn, name="take_cls_token")(x)
             if self.dropout > 0:
                 x = Dropout(self.dropout, name="dropout_layer")(x)
 
@@ -296,6 +296,10 @@ class ClassToken(Layer):
         batch_size = tf.shape(x)[0]
         cls_tokens = tf.tile(self.cls_token, [batch_size, 1, 1])
         return tf.concat([cls_tokens, x], axis=1)
+
+@register_keras_serializable(package="Custom", name="take_cls_token_fn")
+def take_cls_token_fn(x):
+    return x[:, 0, :]
 
 @register_keras_serializable(package="Custom", name="extract_patches")
 def extract_patches(x, patch_size, stride):
