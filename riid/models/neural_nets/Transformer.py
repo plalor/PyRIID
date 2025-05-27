@@ -2,10 +2,10 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, \
-    MultiHeadAttention, LayerNormalization, Layer, Conv1D
+from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, MultiHeadAttention, \
+    LayerNormalization, Layer, Conv1D, TimeDistributed, MaxPooling1D
 from tensorflow.keras.losses import CategoricalCrossentropy
-from tensorflow.keras.models import Model
+from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
@@ -108,8 +108,10 @@ class Transformer(PyRIIDModel):
         if not self.model:
             input_shape = X_train.shape[1]
 
-            # Patch embedding: slide a window of size `patch_size` (with step `stride`) over the
-            # spectrum and project each patch into an `embed_dim`-dimensional token 
+            ### Patch embedding: slide a window of size `patch_size` (with step `stride`) over the
+            ### spectrum and project each patch into an `embed_dim`-dimensional token
+
+            # use raw counts as the embedding
             if self.embed_mode == "raw":
                 assert self.embed_dim == self.patch_size
 
@@ -120,6 +122,7 @@ class Transformer(PyRIIDModel):
                     name="patch_projection"
                 )(inputs)
 
+            # learn a linear mapping between the counts and the embedding
             elif self.embed_mode == "linear":
                 inputs = Input(shape=(input_shape,1), name="Spectrum")
                 x = Conv1D(
@@ -130,8 +133,9 @@ class Transformer(PyRIIDModel):
                     use_bias=True,
                     name="patch_projection"
                 )(inputs)
-                
-            elif self.embed_mode == "nonlinear1":
+
+            # learn a one-layer MLP embedding
+            elif self.embed_mode == "mlp_single":
                 inputs = Input(shape=(input_shape,1), name="Spectrum")
                 x = Conv1D(
                     filters=self.embed_dim,
@@ -142,8 +146,9 @@ class Transformer(PyRIIDModel):
                     activation=self.activation,
                     name="patch_projection"
                 )(inputs)
-                
-            elif self.embed_mode == "nonlinear2":
+
+            # learn a two-layer MLP embedding
+            elif self.embed_mode == "mlp_double":
                 inputs = Input(shape=(input_shape,1), name="Spectrum")
                 x = Conv1D(
                   filters=self.ff_dim,
@@ -159,8 +164,53 @@ class Transformer(PyRIIDModel):
                   activation=self.activation,
                   name="patch_projection2"
                 )(x)
+
+            # learn a one-layer CNN embedding
+            elif self.embed_mode == "cnn_single":
+                inputs = Input(shape=(input_shape,), name="Spectrum")
+
+                patches = Lambda(
+                    extract_patches,
+                    arguments={"patch_size": self.patch_size, "stride": self.stride},
+                    name="patch_extraction"
+                )(inputs)
+                patches = Lambda(add_channel, name="add_channel")(patches)
+
+                def make_patch_cnn_single():
+                    return Sequential([
+                        Conv1D(16, kernel_size=3, padding="same", activation=self.activation),
+                        tf.keras.layers.MaxPooling1D(pool_size=2),
+                        tf.keras.layers.Flatten(),
+                        tf.keras.layers.Dense(self.embed_dim, activation=self.activation)
+                    ])
+
+                x = TimeDistributed(make_patch_cnn_single(), name="patch_cnn_single")(patches)
+
+            # learn a two-layer CNN embedding
+            elif self.embed_mode == "cnn_double":
+                inputs = Input(shape=(input_shape,), name="Spectrum")
+
+                patches = Lambda(
+                    extract_patches,
+                    arguments={"patch_size": self.patch_size, "stride": self.stride},
+                    name="patch_extraction"
+                )(inputs)
+                patches = Lambda(add_channel, name="add_channel")(patches)
+
+                def make_patch_cnn_double():
+                    return Sequential([
+                        Conv1D(16, kernel_size=3, padding="same", activation=self.activation),
+                        tf.keras.layers.MaxPooling1D(pool_size=2),
+                        Conv1D(32, kernel_size=3, padding="same", activation=self.activation),
+                        tf.keras.layers.MaxPooling1D(pool_size=2),
+                        tf.keras.layers.Flatten(),
+                        tf.keras.layers.Dense(self.embed_dim, activation=self.activation)
+                    ])
+
+                x = TimeDistributed(make_patch_cnn_double(), name="patch_cnn_double")(patches)
+
             else:
-                raise ValueError("embed_mode must be `raw` or `linear`, `nonlinear1`, or `nonlinear2`")
+                raise ValueError("`embed_mode` not understood.")
             
             num_patches = (input_shape - self.patch_size) // self.stride + 1
 
@@ -315,3 +365,9 @@ def make_positions(x, num_patches):
     batch = tf.shape(x)[0]
     idx = tf.range(num_patches)[tf.newaxis, :]
     return tf.tile(idx, [batch, 1])
+
+@register_keras_serializable(package="Custom", name="add_channel")
+def add_channel(inputs):
+    """Function to add a channel dimension (serializable)."""
+    # inputs shape: (batch, num_patches, patch_size)
+    return tf.expand_dims(inputs, -1)  # -> (batch, num_patches, patch_size, 1)
