@@ -7,7 +7,7 @@ from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from time import perf_counter as time
+from time import perf_counter as timer
 
 
 class DeepCORAL(PyRIIDModel):
@@ -57,7 +57,7 @@ class DeepCORAL(PyRIIDModel):
             print("WARNING: no pretrained source model was provided")
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
-            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
+            batch_size=64, epochs=None, patience=None, target_level="Isotope", verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -71,8 +71,10 @@ class DeepCORAL(PyRIIDModel):
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
+            patience: number of epochs to wait before early stopping
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
+            training_time: whether to terminate early if run exceeds prealloted time
 
         Returns:
             `tf.History` object.
@@ -92,23 +94,32 @@ class DeepCORAL(PyRIIDModel):
             self.model_inputs = (ModelInput.BackgroundSpectrum,)
         else:
             raise ValueError(f"{source_ss.spectra_type} is not supported in this model.")
+
+        if training_time is None:
+            training_time = np.inf
+            epochs = epochs or 20
                 
-        ### Preparing training data
+        # Preparing training and validation data
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
-
-        X_src_val = source_val_ss.get_samples().astype("float32")
-        X_tgt_val = target_val_ss.get_samples().astype("float32")
 
         source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
 
-        Y_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+        n_val = min(len(source_val_ss), len(target_val_ss))
+        source_val_ss = source_val_ss[:n_val]
+        target_val_ss = target_val_ss[:n_val]
+        
+        X_src_val = source_val_ss.get_samples().astype("float32")
+        X_tgt_val = target_val_ss.get_samples().astype("float32")
 
-        # Make datasets
+        Y_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+        Y_tgt_val = target_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+
+        # Create datasets
         half_batch_size = batch_size // 2
-        steps_per_epoch = max(
+        steps_per_epoch = min(
             len(X_source) // half_batch_size,
             len(X_target) // half_batch_size
         )
@@ -116,44 +127,39 @@ class DeepCORAL(PyRIIDModel):
         source_dataset = (
             tf.data.Dataset
               .from_tensor_slices((X_source, Y_source))
-              .shuffle(len(X_source))
               .repeat()
-              .batch(half_batch_size, drop_remainder=True)
+              .shuffle(len(X_source))
+              .batch(half_batch_size)
         )
         
         target_dataset = (
             tf.data.Dataset
               .from_tensor_slices((X_target,))
-              .shuffle(len(X_target))
               .repeat()
-              .batch(half_batch_size, drop_remainder=True)
+              .shuffle(len(X_target))
+              .batch(half_batch_size)
         )
         
         dataset = (
             tf.data.Dataset
               .zip((source_dataset, target_dataset))
-              .shuffle(buffer_size=steps_per_epoch)
               .prefetch(tf.data.AUTOTUNE)
         )
 
         # Make validation dataset
-        steps_per_epoch_val = max(
-            len(X_src_val) // half_batch_size,
-            len(X_tgt_val) // half_batch_size
-        )
+        batch_size_val = 64
+        half_batch_size_val = batch_size_val // 2
         
         src_val_dataset = (
             tf.data.Dataset
               .from_tensor_slices((X_src_val, Y_src_val))
-              .repeat()
-              .batch(half_batch_size)
+              .batch(half_batch_size_val)
         )
         
         tgt_val_dataset = (
             tf.data.Dataset
-              .from_tensor_slices((X_tgt_val,))
-              .repeat()
-              .batch(half_batch_size)
+              .from_tensor_slices((X_tgt_val, Y_tgt_val))
+              .batch(half_batch_size_val)
         )
         
         val_dataset = (
@@ -180,17 +186,27 @@ class DeepCORAL(PyRIIDModel):
         self.history = {"total_loss": [], "class_loss": [], "coral_loss": [], "src_val_loss": [], "tgt_val_loss": [], "coral_val_loss": []}
         best_val_loss = np.inf
         best_weights = None
-        t0 = time()
+        wait = 0
+        epoch = 0
+        t0 = timer()
 
         it = iter(dataset)
-        for epoch in range(epochs):
+        while True:
+            epoch += 1
+            if epochs is not None and epoch > epochs:
+                break
+            
             if verbose:
-                print(f"Epoch {epoch+1}/{epochs}")
-                t1 = time()
+                t1 = timer()
+                if epochs:
+                    print(f"Epoch {epoch}/{epochs}...", end="")
+                else:
+                    print(f"Epoch {epoch}...", end="")
 
             total_loss_avg = tf.keras.metrics.Mean()
             class_loss_avg = tf.keras.metrics.Mean()
             coral_loss_avg = tf.keras.metrics.Mean()
+            
             for step in range(steps_per_epoch):
                 (x_s, y_s), x_t = next(it)
                 total_loss, class_loss, coral_val = self.train_step(x_s, y_s, x_t)
@@ -198,11 +214,18 @@ class DeepCORAL(PyRIIDModel):
                 class_loss_avg.update_state(class_loss)
                 coral_loss_avg.update_state(coral_val)
 
-            src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
-            tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
-
+            src_class_loss_avg = tf.keras.metrics.Mean()
+            tgt_class_loss_avg = tf.keras.metrics.Mean()
             coral_val_loss_avg = tf.keras.metrics.Mean()
-            for (x_s_val, _), x_t_val in val_dataset.take(steps_per_epoch_val):
+            for (x_s_val, y_s_val), (x_t_val, y_t_val) in val_dataset:
+                y_s_pred = self.model(x_s_val, training=False)
+                loss_s  = self.classification_loss(y_s_val, y_s_pred)
+                src_class_loss_avg.update_state(loss_s)
+            
+                y_t_pred = self.model(x_t_val, training=False)
+                loss_t  = self.classification_loss(y_t_val, y_t_pred)
+                tgt_class_loss_avg.update_state(loss_t)
+                
                 f_s_val = self.feature_extractor(x_s_val, training=False)
                 f_t_val = self.feature_extractor(x_t_val, training=False)
                 coral_val_loss = self.coral_loss(f_s_val, f_t_val)
@@ -211,6 +234,9 @@ class DeepCORAL(PyRIIDModel):
             total_loss = total_loss_avg.result().numpy()
             class_loss = class_loss_avg.result().numpy()
             coral_loss = coral_loss_avg.result().numpy()
+
+            src_val_loss = src_class_loss_avg.result().numpy()
+            tgt_val_loss = tgt_class_loss_avg.result().numpy()
             coral_val_loss = coral_val_loss_avg.result().numpy()
 
             self.history["total_loss"].append(total_loss)
@@ -220,13 +246,8 @@ class DeepCORAL(PyRIIDModel):
             self.history["tgt_val_loss"].append(tgt_val_loss)
             self.history["coral_val_loss"].append(coral_val_loss)
 
-            # Save best model weights based on the validation loss
-            if tgt_val_loss < best_val_loss:
-                best_val_loss = tgt_val_loss
-                best_weights = self.model.get_weights()
-
             if verbose:
-                print(f"Finished in {time()-t1:.0f} seconds")
+                print(f"Finished in {timer()-t1:.0f} seconds")
                 print("  "
                       f"total_loss: {total_loss:.3g} - "
                       f"class_loss: {class_loss:.3g} - "
@@ -235,7 +256,23 @@ class DeepCORAL(PyRIIDModel):
                       f"tgt_val_loss: {tgt_val_loss:.3g} - "
                       f"coral_val_loss: {coral_val_loss:.3g}")
 
-        self.history["training_time"] = time() - t0
+            # Save best model weights based on the validation loss
+            if tgt_val_loss < best_val_loss:
+                best_val_loss = tgt_val_loss
+                best_weights = self.model.get_weights()
+                wait = 0
+            else:
+                wait += 1
+                if patience is not None and wait > patience:
+                    if verbose:
+                        print(f"No improvement for {patience} epochs, stopping early.")
+                    break
+
+            if timer() - t0 > training_time:
+                if verbose:
+                    print("Reached preallotted training time, terminating.")
+                break
+
         if best_weights is not None:
             self.model.set_weights(best_weights)
 

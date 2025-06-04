@@ -8,13 +8,14 @@ from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from time import perf_counter as time
+from time import perf_counter as timer
 
 
 class DANN(PyRIIDModel):
     """Domain Adversarial Neural Network classifier."""
-    def __init__(self, activation=None, d_optimizer=None, f_optimizer=None,
-                 source_model=None, grl_hidden_layers=None, gamma=10, lmbda=0):
+    def __init__(self, activation="relu", d_optimizer=None, f_optimizer=None,
+                 source_model=None, grl_hidden_layers=None, use_da_scheduler=True,
+                 da_param=10):
         """
         Args:
             activation: activation function to use for discriminator dense layer
@@ -22,17 +23,20 @@ class DANN(PyRIIDModel):
             f_optimizer: tensorflow optimizer or optimizer name for the feature extractor
             source_model: pretrained source model
             grl_hidden_layers: sizes of the gradient reversal dense layers
-            gamma: hyperparameter for adjusting domain adaptation parameter
-            lmbda: domain adaptation parameter. Ignored if gamma is specified
+            use_da_scheduler: whether to use a scheduler for ramping up lambda
+            da_param: value for gamma (if using a da scheduler), otherwise value for lambda
         """
         super().__init__()
 
-        self.activation = activation or "relu"
+        self.activation = activation
         self.d_optimizer = d_optimizer or Adam(learning_rate=0.001)
         self.f_optimizer = f_optimizer or Adam(learning_rate=0.001)
         self.grl_hidden_layers = grl_hidden_layers
-        self.gamma = gamma
-        self.lmbda = lmbda
+        self.use_da_scheduler = use_da_scheduler
+        if self.use_da_scheduler:
+            self.gamma = da_param
+        else:
+            self.lmbda = da_param
         self.discriminator_loss = BinaryCrossentropy()
 
         if source_model is not None:
@@ -68,7 +72,7 @@ class DANN(PyRIIDModel):
             print("WARNING: no pretrained source model was provided")
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
-            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
+            batch_size=64, epochs=None, patience=None, target_level="Isotope", verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -82,8 +86,10 @@ class DANN(PyRIIDModel):
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
+            patience: number of epochs to wait before early stopping
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
+            training_time: whether to terminate early if run exceeds prealloted time
 
         Returns:
             `tf.History` object.
@@ -104,20 +110,31 @@ class DANN(PyRIIDModel):
         else:
             raise ValueError(f"{source_ss.spectra_type} is not supported in this model.")
 
-        ### Preparing training data
+        if training_time is None:
+            training_time = np.inf
+            epochs = epochs or 20
+
+        # Preparing training and validation data
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
-
-        X_src_val = source_val_ss.get_samples().astype("float32")
-        X_tgt_val = target_val_ss.get_samples().astype("float32")
 
         source_contributions_df = source_ss.sources.T.groupby(target_level, sort=False).sum().T
         model_outputs = source_contributions_df.columns.values.tolist()
         Y_source = source_contributions_df.values.astype("float32")
 
-        # Make datasets
+        n_val = min(len(source_val_ss), len(target_val_ss))
+        source_val_ss = source_val_ss[:n_val]
+        target_val_ss = target_val_ss[:n_val]
+        
+        X_src_val = source_val_ss.get_samples().astype("float32")
+        X_tgt_val = target_val_ss.get_samples().astype("float32")
+
+        Y_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+        Y_tgt_val = target_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+
+        # Create datasets
         half_batch_size = batch_size // 2
-        steps_per_epoch = max(
+        steps_per_epoch = min(
             len(X_source) // half_batch_size,
             len(X_target) // half_batch_size
         )
@@ -125,23 +142,44 @@ class DANN(PyRIIDModel):
         source_dataset = (
             tf.data.Dataset
               .from_tensor_slices((X_source, Y_source))
-              .shuffle(len(X_source))
               .repeat()
-              .batch(half_batch_size, drop_remainder=True)
+              .shuffle(len(X_source))
+              .batch(half_batch_size)
         )
         
         target_dataset = (
             tf.data.Dataset
               .from_tensor_slices((X_target,))
-              .shuffle(len(X_target))
               .repeat()
-              .batch(half_batch_size, drop_remainder=True)
+              .shuffle(len(X_target))
+              .batch(half_batch_size)
         )
         
         dataset = (
             tf.data.Dataset
               .zip((source_dataset, target_dataset))
-              .shuffle(buffer_size=steps_per_epoch)
+              .prefetch(tf.data.AUTOTUNE)
+        )
+
+        # Make validation dataset
+        batch_size_val = 64
+        half_batch_size_val = batch_size_val // 2
+        
+        src_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_src_val, Y_src_val))
+              .batch(half_batch_size_val)
+        )
+        
+        tgt_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_tgt_val, Y_tgt_val))
+              .batch(half_batch_size_val)
+        )
+        
+        val_dataset = (
+            tf.data.Dataset
+              .zip((src_val_dataset, tgt_val_dataset))
               .prefetch(tf.data.AUTOTUNE)
         )
 
@@ -170,19 +208,31 @@ class DANN(PyRIIDModel):
         )
 
         # Training loop
-        self.history = {"total_loss": [], "class_loss": [], "domain_loss": [], "src_val_loss": [], "tgt_val_loss": []}
+        self.history = {"total_loss": [], "class_loss": [], "domain_loss": [], "src_val_loss": [], "tgt_val_loss": [], "domain_val_loss": []}
         best_val_loss = np.inf
         best_weights = None
-        t0 = time()
+        wait = 0
+        epoch = 0
+        t0 = timer()
 
         it = iter(dataset)
-        for epoch in range(epochs):
+        while True:
+            epoch += 1
+            if epochs is not None and epoch > epochs:
+                break
+            
             if verbose:
-                print(f"Epoch {epoch+1}/{epochs}")
-                t1 = time()
+                t1 = timer()
+                if epochs:
+                    print(f"Epoch {epoch}/{epochs}...", end="")
+                else:
+                    print(f"Epoch {epoch}...", end="")
 
-            if self.gamma > 0:
-                p = epoch / epochs
+            if self.use_da_scheduler:
+                if epochs is not None:
+                    p = epoch / epochs
+                else:
+                    p = epochs / 1000
                 new_lmbda = 2.0 / (1.0 + np.exp(-self.gamma * p)) - 1.0
             else:
                 new_lmbda = self.lmbda
@@ -199,34 +249,75 @@ class DANN(PyRIIDModel):
                 class_loss_avg.update_state(class_loss)
                 domain_loss_avg.update_state(domain_loss)
 
-            src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
-            tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
+            src_class_loss_avg = tf.keras.metrics.Mean()
+            tgt_class_loss_avg = tf.keras.metrics.Mean()
+            domain_val_loss_avg = tf.keras.metrics.Mean()
+            for (x_s_val, y_s_val), (x_t_val, y_t_val) in val_dataset:
+                y_s_pred = self.model(x_s_val, training=False)
+                loss_s  = self.classification_loss(y_s_val, y_s_pred)
+                src_class_loss_avg.update_state(loss_s)
+            
+                y_t_pred = self.model(x_t_val, training=False)
+                loss_t  = self.classification_loss(y_t_val, y_t_pred)
+                tgt_class_loss_avg.update_state(loss_t)
+                
+                f_s_val = self.feature_extractor(x_s_val, training=False)
+                f_t_val = self.feature_extractor(x_t_val, training=False)
+            
+                d_s_val = self.discriminator(f_s_val, training=False)
+                d_t_val = self.discriminator(f_t_val, training=False)
+            
+                y_s_domain = tf.zeros_like(d_s_val)
+                y_t_domain = tf.ones_like(d_t_val)
+            
+                loss_s_domain = self.discriminator_loss(y_s_domain, d_s_val)
+                loss_t_domain = self.discriminator_loss(y_t_domain, d_t_val)
+                domain_val_loss = loss_s_domain + loss_t_domain
+            
+                domain_val_loss_avg.update_state(domain_val_loss)
 
             total_loss = total_loss_avg.result().numpy()
             class_loss = class_loss_avg.result().numpy()
             domain_loss = domain_loss_avg.result().numpy()
+
+            src_val_loss = src_class_loss_avg.result().numpy()
+            tgt_val_loss = tgt_class_loss_avg.result().numpy()
+            domain_val_loss = domain_val_loss_avg.result().numpy()
             
             self.history["total_loss"].append(total_loss)
             self.history["class_loss"].append(class_loss)
             self.history["domain_loss"].append(domain_loss)
             self.history["src_val_loss"].append(src_val_loss)
             self.history["tgt_val_loss"].append(tgt_val_loss)
-        
-            # save best model weights based on validation score
-            if tgt_val_loss < best_val_loss:
-                best_val_loss = tgt_val_loss
-                best_weights = self.model.get_weights()
+            self.history["domain_val_loss"].append(domain_val_loss)
 
             if verbose:
-                print(f"Finished in {time()-t1:.0f} seconds")
+                print(f"Finished in {timer()-t1:.0f} seconds")
                 print("  "
                       f"total_loss: {total_loss:.3g} - "
                       f"class_loss: {class_loss:.3g} - "
                       f"domain_loss: {domain_loss:.3g} - "
                       f"src_val_loss: {src_val_loss:.3g} - "
-                      f"tgt_val_loss: {tgt_val_loss:.3g}")
+                      f"tgt_val_loss: {tgt_val_loss:.3g} - "
+                      f"domain_val_loss: {domain_val_loss:.3g}")
 
-        self.history["training_time"] = time() - t0
+            # Save best model weights based on the validation loss
+            if tgt_val_loss < best_val_loss:
+                best_val_loss = tgt_val_loss
+                best_weights = self.model.get_weights()
+                wait = 0
+            else:
+                wait += 1
+                if patience is not None and wait > patience:
+                    if verbose:
+                        print(f"No improvement for {patience} epochs, stopping early.")
+                    break
+
+            if timer() - t0 > training_time:
+                if verbose:
+                    print("Reached preallotted training time, terminating.")
+                break
+
         if best_weights is not None:
             self.model.set_weights(best_weights)
 

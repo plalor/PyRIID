@@ -16,7 +16,7 @@ from time import perf_counter as time
 class LSTMClassifier(PyRIIDModel):
     """LSTM classifier."""
     def __init__(self, loss=None, optimizer=None, metrics=None, l2_alpha=None,
-                 activity_regularizer=None, final_activation=None, hidden_layers=None,
+                 activity_regularizer=None, final_activation="softmax", hidden_layers=None,
                  patch_size=None, stride=None, bidirectional=False, dropout=0):
         """
         Args:
@@ -39,7 +39,7 @@ class LSTMClassifier(PyRIIDModel):
         self.metrics = metrics
         self.kernel_regularizer = l2(l2_alpha) if l2_alpha else None
         self.activity_regularizer = activity_regularizer
-        self.final_activation = final_activation or "softmax"
+        self.final_activation = final_activation
 
         self.hidden_layers = hidden_layers
         self.patch_size = patch_size
@@ -49,9 +49,9 @@ class LSTMClassifier(PyRIIDModel):
 
         self.model = None
 
-    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size: int = 200,
-            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_loss",
-            es_mode: str = "min", es_verbose=0, target_level="Isotope", verbose: bool = False):
+    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=20,
+            callbacks=None, patience=10**4, es_monitor="val_loss", es_mode="min", es_verbose=0,
+            target_level="Isotope", verbose=False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -105,15 +105,10 @@ class LSTMClassifier(PyRIIDModel):
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
 
-            num_patches = (input_shape - self.patch_size) // self.stride + 1
-            x = Lambda(lambda z: tf.signal.frame(
-                    z,
-                    frame_length=self.patch_size,
-                    frame_step=self.stride,
-                    axis=1
-                ),
-                output_shape=(num_patches, self.patch_size),
-                name="extract_patches"
+            x = Lambda(
+                extract_patches,
+                arguments={"patch_size": self.patch_size, "stride": self.stride},
+                name="patch_projection"
             )(inputs)
 
             for layer, units in enumerate(self.hidden_layers):
@@ -211,3 +206,15 @@ class LSTMClassifier(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
+
+### Need to decorate with serialization API to save/load model
+from tensorflow.keras.utils import register_keras_serializable
+
+@register_keras_serializable(package="Custom", name="extract_patches")
+def extract_patches(x, patch_size, stride):
+    return tf.signal.frame(
+        x,
+        frame_length=patch_size,
+        frame_step=stride,
+        axis=1
+    )

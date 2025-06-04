@@ -10,12 +10,12 @@ from tensorflow.keras.optimizers import Adam
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
 from sklearn.metrics import accuracy_score, pairwise_distances
-from time import perf_counter as time
+from time import perf_counter as timer
 
 
 class ADDA(PyRIIDModel):
     """Adversarial Discriminative Domain Adaptation classifier"""            
-    def __init__(self, activation=None, d_optimizer=None, t_optimizer=None,
+    def __init__(self, activation="relu", d_optimizer=None, t_optimizer=None,
                  source_model=None, discriminator_hidden_layers=None):
         """
         Args:
@@ -27,12 +27,12 @@ class ADDA(PyRIIDModel):
         """
         super().__init__()
 
-        self.activation = activation or "relu"
+        self.activation = activation
         self.d_optimizer = d_optimizer or Adam(learning_rate=0.001)
         self.t_optimizer = t_optimizer or Adam(learning_rate=0.001)
         self.discriminator_hidden_layers = discriminator_hidden_layers
         self.discriminator_loss = BinaryCrossentropy()
-        #self.discriminator_loss = BinaryCrossentropy(label_smoothing=0.1) # soft labels
+        # self.discriminator_loss = BinaryCrossentropy(label_smoothing=0.1) # soft labels
 
         if source_model is not None:
             self.classification_loss = source_model.loss
@@ -73,7 +73,7 @@ class ADDA(PyRIIDModel):
             print("WARNING: no pretrained source model was provided")
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
-            batch_size: int = 200, epochs: int = 20, target_level="Isotope", verbose: bool = False):
+            batch_size=64, epochs=None, patience=None, target_level="Isotope", verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -87,8 +87,10 @@ class ADDA(PyRIIDModel):
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
+            patience: number of epochs to wait before early stopping
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
+            training_time: whether to terminate early if run exceeds prealloted time
 
         Returns:
             `tf.History` object.
@@ -109,12 +111,23 @@ class ADDA(PyRIIDModel):
         else:
             raise ValueError(f"{source_ss.spectra_type} is not supported in this model.")
 
-        ### Preparing training data
+        if training_time is None:
+            training_time = np.inf
+            epochs = epochs or 20
+
+        # Preparing training and validation data
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
 
+        n_val = min(len(source_val_ss), len(target_val_ss))
+        source_val_ss = source_val_ss[:n_val]
+        target_val_ss = target_val_ss[:n_val]
+        
         X_src_val = source_val_ss.get_samples().astype("float32")
         X_tgt_val = target_val_ss.get_samples().astype("float32")
+
+        Y_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
+        Y_tgt_val = target_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
 
         ### Isotopic labels
         isotope_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
@@ -123,12 +136,10 @@ class ADDA(PyRIIDModel):
         # Domain labels: 0 for source, 1 for target
         domain_source = np.zeros(len(X_source)).reshape(-1, 1)
         domain_target = np.ones(len(X_target)).reshape(-1, 1)
-        domain_src_val = np.zeros(len(X_src_val)).reshape(-1, 1)
-        domain_tgt_val = np.ones(len(X_tgt_val)).reshape(-1, 1)
 
         # Make datasets
         half_batch_size = batch_size // 2
-        steps_per_epoch = max(
+        steps_per_epoch = min(
             len(X_source) // half_batch_size,
             len(X_target) // half_batch_size
         )
@@ -136,23 +147,44 @@ class ADDA(PyRIIDModel):
         source_dataset = (
             tf.data.Dataset
               .from_tensor_slices((X_source, domain_source))
-              .shuffle(len(X_source))
               .repeat()
-              .batch(half_batch_size, drop_remainder=True)
+              .shuffle(len(X_source))
+              .batch(half_batch_size)
         )
         
         target_dataset = (
             tf.data.Dataset
               .from_tensor_slices((X_target, domain_target))
-              .shuffle(len(X_target))
               .repeat()
-              .batch(half_batch_size, drop_remainder=True)
+              .shuffle(len(X_source))
+              .batch(half_batch_size)
         )
         
         dataset = (
             tf.data.Dataset
               .zip((source_dataset, target_dataset))
-              .shuffle(buffer_size=steps_per_epoch)
+              .prefetch(tf.data.AUTOTUNE)
+        )
+
+        # Make validation dataset
+        batch_size_val = 64
+        half_batch_size_val = batch_size_val // 2
+        
+        src_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_src_val, Y_src_val))
+              .batch(half_batch_size_val)
+        )
+        
+        tgt_val_dataset = (
+            tf.data.Dataset
+              .from_tensor_slices((X_tgt_val, Y_tgt_val))
+              .batch(half_batch_size_val)
+        )
+        
+        val_dataset = (
+            tf.data.Dataset
+              .zip((src_val_dataset, tgt_val_dataset))
               .prefetch(tf.data.AUTOTUNE)
         )
 
@@ -199,13 +231,22 @@ class ADDA(PyRIIDModel):
 
         best_val_loss = np.inf
         best_weights = None
-        t0 = time()
+        wait = 0
+        epoch = 0
+        t0 = timer()
 
         it = iter(dataset)
-        for epoch in range(epochs):
+        while True:
+            epoch += 1
+            if epochs is not None and epoch > epochs:
+                break
+            
             if verbose:
-                print(f"Epoch {epoch+1}/{epochs}")
-                t1 = time()
+                t1 = timer()
+                if epochs:
+                    print(f"Epoch {epoch}/{epochs}...", end="")
+                else:
+                    print(f"Epoch {epoch}...", end="")
 
             d_loss_avg = tf.keras.metrics.Mean()
             t_loss_avg = tf.keras.metrics.Mean()
@@ -216,20 +257,38 @@ class ADDA(PyRIIDModel):
                 d_loss_avg.update_state(d_loss)
                 t_loss_avg.update_state(t_loss)
 
-            src_val_loss = self.calc_loss(source_val_ss, target_level=target_level, batch_size=batch_size)
-            tgt_val_loss = self.calc_loss(target_val_ss, target_level=target_level, batch_size=batch_size)
-
-            f_src_val = self.source_encoder.predict(X_src_val, batch_size=batch_size)
-            f_tgt_val = self.target_encoder.predict(X_tgt_val, batch_size=batch_size)
-
-            domain_val = tf.concat([domain_src_val, domain_tgt_val], axis=0)
-            f_val = tf.concat([f_src_val, f_tgt_val], axis=0)
-            pred_val = self.discriminator(f_val, training=False)
+            src_class_loss_avg = tf.keras.metrics.Mean()
+            tgt_class_loss_avg = tf.keras.metrics.Mean()
+            d_val_loss_avg = tf.keras.metrics.Mean()
+            for (x_s_val, y_s_val), (x_t_val, y_t_val) in val_dataset:
+                y_s_pred = self.model(x_s_val, training=False)
+                loss_s  = self.classification_loss(y_s_val, y_s_pred)
+                src_class_loss_avg.update_state(loss_s)
             
-            d_val_loss = self.discriminator_loss(domain_val, pred_val).numpy()
+                y_t_pred = self.model(x_t_val, training=False)
+                loss_t  = self.classification_loss(y_t_val, y_t_pred)
+                tgt_class_loss_avg.update_state(loss_t)
+                
+                f_s_val = self.source_encoder(x_s_val, training=False)
+                f_t_val = self.target_encoder(x_t_val, training=False)
+
+                pred_s_val = self.discriminator(f_s_val, training=True)
+                pred_t_val = self.discriminator(f_t_val, training=True)
+
+                domain_src_val = np.zeros(len(x_s_val)).reshape(-1, 1)
+                domain_tgt_val = np.ones(len(x_t_val)).reshape(-1, 1)
+                
+                loss_s_val = self.discriminator_loss(domain_src_val, pred_s_val)
+                loss_t_val = self.discriminator_loss(domain_tgt_val, pred_t_val)
+                d_val_loss = (loss_s_val + loss_t_val) / 2.0
+                d_val_loss_avg.update_state(d_val_loss)
 
             d_loss = d_loss_avg.result().numpy()
             t_loss = t_loss_avg.result().numpy()
+
+            src_val_loss = src_class_loss_avg.result().numpy()
+            tgt_val_loss = tgt_class_loss_avg.result().numpy()
+            d_val_loss = d_val_loss_avg.result().numpy()
 
             self.history["d_loss"].append(d_loss)
             self.history["t_loss"].append(t_loss)
@@ -237,13 +296,8 @@ class ADDA(PyRIIDModel):
             self.history["tgt_val_loss"].append(tgt_val_loss)
             self.history["d_val_loss"].append(d_val_loss)
         
-            # save best model weights based on validation score
-            if tgt_val_loss < best_val_loss:
-                best_val_loss = tgt_val_loss
-                best_weights = self.model.get_weights()
-
             if verbose:
-                print(f"Finished in {time()-t1:.0f} seconds")
+                print(f"Finished in {timer()-t1:.0f} seconds")
                 print("  "
                       f"d_loss: {d_loss:.3g} - "
                       f"t_loss: {t_loss:.3g} - "
@@ -251,12 +305,27 @@ class ADDA(PyRIIDModel):
                       f"tgt_val_loss: {tgt_val_loss:.3g} - "
                       f"d_val_loss: {d_val_loss:.3g}")
 
-        self.history["training_time"] = time() - t0
+            # Save best model weights based on the validation loss
+            if tgt_val_loss < best_val_loss:
+                best_val_loss = tgt_val_loss
+                best_weights = self.model.get_weights()
+                wait = 0
+            else:
+                wait += 1
+                if patience is not None and wait > patience:
+                    if verbose:
+                        print(f"No improvement for {patience} epochs, stopping early.")
+                    break
+
+            if timer() - t0 > training_time:
+                if verbose:
+                    print("Reached preallotted training time, terminating.")
+                break
+
         if best_weights is not None:
             self.model.set_weights(best_weights)
 
         return self.history
-
     def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
         """Classify the spectra in the provided `SampleSet`(s).
 

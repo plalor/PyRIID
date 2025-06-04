@@ -15,9 +15,9 @@ from time import perf_counter as time
 
 class MLP(PyRIIDModel):
     """Multi-layer perceptron classifier."""
-    def __init__(self, activation=None, loss=None, optimizer=None,
+    def __init__(self, activation="relu", loss=None, optimizer=None,
                  metrics=None, l2_alpha=None, activity_regularizer=None,
-                 final_activation=None, hidden_layers=None, dropout=0):
+                 final_activation="softmax", hidden_layers=None, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -32,22 +32,22 @@ class MLP(PyRIIDModel):
         """
         super().__init__()
 
-        self.activation = activation or "relu"
+        self.activation = activation
         self.loss = loss or CategoricalCrossentropy()
         self.optimizer = optimizer or Adam(learning_rate=0.001)
         self.metrics = metrics
         self.kernel_regularizer = l2(l2_alpha) if l2_alpha else None
         self.activity_regularizer = activity_regularizer
-        self.final_activation = final_activation or "softmax"
+        self.final_activation = final_activation
 
         self.hidden_layers = hidden_layers
         self.dropout = dropout
 
         self.model = None
 
-    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size: int = 200,
-            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_loss",
-            es_mode: str = "min", es_verbose=0, target_level="Isotope", verbose: bool = False):
+    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=20,
+            callbacks=None, patience=10**4, es_monitor="val_loss", es_mode="min", es_verbose=0,
+            target_level="Isotope", verbose=False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:

@@ -15,9 +15,9 @@ from time import perf_counter as time
 
 class Transformer(PyRIIDModel):
     """Transformer classifier."""
-    def __init__(self, activation=None, loss=None, optimizer=None, metrics=None,
-                 final_activation=None, embed_mode=None, embed_dim=None, num_heads=None, ff_dim=None,
-                 num_layers=None, patch_size=None, stride=None, dropout=0):
+    def __init__(self, activation="relu", loss=None, optimizer=None, metrics=None,
+                 final_activation="softmax", embed_mode="linear", embed_dim=None, num_heads=None,
+                 ff_dim=None, num_layers=None, patch_size=None, stride=None, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -36,13 +36,13 @@ class Transformer(PyRIIDModel):
         """
         super().__init__()
 
-        self.activation = activation or "relu"
+        self.activation = activation
         self.loss = loss or CategoricalCrossentropy()
         self.optimizer = optimizer or Adam(learning_rate=0.001)
         self.metrics = metrics
-        self.final_activation = final_activation or "softmax"
+        self.final_activation = final_activation
 
-        self.embed_mode = embed_mode or "linear"
+        self.embed_mode = embed_mode.lower()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.ff_dim = ff_dim
@@ -53,9 +53,9 @@ class Transformer(PyRIIDModel):
 
         self.model = None
 
-    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size: int = 200,
-            epochs: int = 20, callbacks = None, patience: int = 10**4, es_monitor: str = "val_loss",
-            es_mode: str = "min", es_verbose=0, target_level="Isotope", verbose: bool = False):
+    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=20,
+            callbacks=None, patience=10**4, es_monitor="val_loss", es_mode="min", es_verbose=0,
+            target_level="Isotope", verbose=False):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -323,7 +323,7 @@ class Transformer(PyRIIDModel):
         ss.classified_by = self.model_id
 
 ### Need to decorate with serialization API to save/load model
-from tensorflow.keras.saving import register_keras_serializable
+from tensorflow.keras.utils import register_keras_serializable
 
 @register_keras_serializable(package="Custom", name="ClassToken")
 class ClassToken(Layer):
