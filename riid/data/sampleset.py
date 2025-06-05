@@ -9,12 +9,12 @@ import copy
 import json
 import logging
 import operator
-import os
 import random
 import re
 import warnings
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Callable, Iterable, Tuple, Union
 
 import numpy as np
@@ -340,7 +340,7 @@ class SampleSet():
     @property
     def ecal(self):
         """Get or set the ecal terms."""
-        ecal_terms = self.info[list(self.ECAL_INFO_COLUMNS)].values
+        ecal_terms = self.info[list(self.ECAL_INFO_COLUMNS)].to_numpy(dtype=float)
         return ecal_terms
 
     @ecal.setter
@@ -543,6 +543,9 @@ class SampleSet():
             new_cubic: new cubic value, i.e. the 3-th e-cal term
             new_low_energy: new low energy term
 
+        Returns:
+            A new `SamleSet` with `spectra` and `info` DataFrames
+
         Raises:
             `ValueError` when no argument values are provided
         """
@@ -587,6 +590,48 @@ class SampleSet():
         new_ss.spectra = pd.DataFrame(new_spectra)
         new_ss.info.total_counts = new_ss.spectra.sum(axis=1)
         new_ss.info[ecal_cols] = new_ecal
+        return new_ss
+
+    def as_regions(self, rois: list) -> SampleSet:
+        """Obtains a new `SampleSet` where the spectra are limited to specific
+        regions of interest (ROIs).
+
+        Notes:
+            - If your samples have disparate energy calibration terms, call `as_ecal()` first
+              to align channel space, then you may call this function. Otherwise, it is possible
+              to end up with a ragged array of spectra, which we do not support.
+            - After this call, `spectra` will have columns filled in with energy values for
+              convenience. As such, in the context of the returned `SampleSet`, the energy
+              calibration terms in `info` will no longer have any meaning, and any subsequent
+              calls to methods like `as_ecal()` would not make sense.  This method is intended
+              as a last step to be performed right before analysis of whatever kind.
+
+        Args:
+            rois: a list of 2-tuples where tuple represents (low energy, high energy)
+
+        Returns:
+            A new `SamleSet` with only ROIs remaining in the `spectra` DataFrame
+
+        Raises:
+            `ValueError` when no argument values are provided
+        """
+        if not rois:
+            raise ValueError("At least one ROI must be provided.")
+        all_ecals = self.ecal
+        all_ecals_are_same = np.isclose(all_ecals, all_ecals[0]).all()
+        if not all_ecals_are_same:
+            msg = "Spectra have different energy calibrations; consider `as_ecal()` first."
+            raise ValueError(msg)
+
+        energies = self.get_channel_energies(0)
+        mask = _get_energy_roi_masks(rois, energies)
+        new_spectra = self.spectra.to_numpy(dtype=float)[:, mask]
+        new_spectra = new_spectra.reshape((self.n_samples, -1))
+        mask_energies = energies[mask]
+
+        new_ss = self[:]
+        new_ss.spectra = pd.DataFrame(new_spectra, columns=mask_energies)
+        new_ss.info.total_counts = new_ss.spectra.sum(axis=1)
         return new_ss
 
     def check_seed_health(self, dead_time_threshold=1.0):
@@ -1387,7 +1432,7 @@ class SampleSet():
 
         return flat_ss
 
-    def to_hdf(self, path: str, verbose=False, **kwargs):
+    def to_hdf(self, path: str | Path, verbose=False, **kwargs):
         """Write the `SampleSet` to disk as a HDF file.
 
         Args:
@@ -1398,14 +1443,15 @@ class SampleSet():
         Raises:
             `ValueError` when provided path extension is invalid
         """
-        if not path.lower().endswith(riid.SAMPLESET_HDF_FILE_EXTENSION):
+        path = Path(path)
+        if path.suffix != riid.SAMPLESET_HDF_FILE_EXTENSION:
             logging.warning(f"Path does not end in {riid.SAMPLESET_HDF_FILE_EXTENSION}")
 
         _write_hdf(self, path, **kwargs)
         if verbose:
             logging.info(f"Saved SampleSet to '{path}'")
 
-    def to_json(self, path: str, verbose=False):
+    def to_json(self, path: str | Path, verbose=False):
         """Write the `SampleSet` to disk as a JSON file.
 
         Warning: it is not recommended that you use this on large `SampleSet` objects.
@@ -1418,14 +1464,15 @@ class SampleSet():
         Raises:
             `ValueError` when provided path extension is invalid
         """
-        if not path.lower().endswith(riid.SAMPLESET_JSON_FILE_EXTENSION):
+        path = Path(path)
+        if path.suffix != riid.SAMPLESET_JSON_FILE_EXTENSION:
             logging.warning(f"Path does not end in {riid.SAMPLESET_JSON_FILE_EXTENSION}")
 
         _write_json(self, path)
         if verbose:
             logging.info(f"Saved SampleSet to '{path}'")
 
-    def to_pcf(self, path: str, verbose=False):
+    def to_pcf(self, path: str | Path, verbose=False):
         """Write the `SampleSet` to disk as a PCF.
 
         Args:
@@ -1435,7 +1482,8 @@ class SampleSet():
         Raises:
             `ValueError` when provided path extension is invalid
         """
-        if not path.lower().endswith(riid.PCF_FILE_EXTENSION):
+        path = Path(path)
+        if path.suffix != riid.PCF_FILE_EXTENSION:
             logging.warning(f"Path does not end in {riid.PCF_FILE_EXTENSION}")
 
         _dict_to_pcf(_ss_to_pcf_dict(self, verbose), path, verbose)
@@ -1488,8 +1536,8 @@ def read_hdf(path: str, row_slice: tuple[int, int] = None) -> SampleSet:
     Returns:
         `SampleSet` object
     """
-    expanded_path = os.path.expanduser(path)
-    if not os.path.isfile(expanded_path):
+    expanded_path = Path(path).expanduser()
+    if not expanded_path.is_file():
         raise FileNotFoundError(f"No file found at location '{expanded_path}'.")
 
     ss = _read_hdf(expanded_path, row_slice)
@@ -1500,7 +1548,7 @@ def read_hdf(path: str, row_slice: tuple[int, int] = None) -> SampleSet:
     return ss
 
 
-def read_pcf(path: str, verbose: bool = False) -> SampleSet:
+def read_pcf(path: str | Path, verbose: bool = False) -> SampleSet:
     """Read a PCF file in as a `SampleSet` object.
 
     Args:
@@ -1510,7 +1558,7 @@ def read_pcf(path: str, verbose: bool = False) -> SampleSet:
     Returns:
         `Sampleset` object
     """
-    expanded_path = os.path.expanduser(path)
+    expanded_path = Path(path).expanduser()
     return _pcf_dict_to_ss(_pcf_to_dict(expanded_path, verbose), verbose)
 
 
@@ -1673,7 +1721,7 @@ def _read_hdf(path: str, row_slice: tuple[int, int] = None) -> SampleSet:
     return ss
 
 
-def _write_hdf(ss: SampleSet, output_path: str, **kwargs):
+def _write_hdf(ss: SampleSet, output_path: Path, **kwargs):
     """Write a `SampleSet` to an HDF file.
 
     Args:
@@ -1900,15 +1948,15 @@ def _pcf_dict_to_ss(pcf_dict: dict, verbose=True):
     return ss
 
 
-def _write_json(ss: SampleSet, output_path: str):
+def _write_json(ss: SampleSet, output_path: Path):
     ss_dict = _ss_to_pcf_dict(ss)
     ss_dict["detector_info"] = ss.detector_info
     with open(output_path, "w") as fout:
         json.dump(ss_dict, fout, indent=4)
 
 
-def read_json(path: str) -> SampleSet:
-    expanded_path = os.path.expanduser(path)
+def read_json(path: str | Path) -> SampleSet:
+    expanded_path = Path(path).expanduser()
     with open(expanded_path, "r") as fin:
         ss_dict = json.load(fin)
     ss = _pcf_dict_to_ss(ss_dict)
@@ -1938,6 +1986,14 @@ def _get_distance_df_from_values(distance_values: np.ndarray,
         distance_df.at[r, c] = value
 
     return distance_df
+
+
+def _get_energy_roi_masks(rois: list, energies: np.ndarray) -> np.ndarray:
+    masks = np.zeros(energies.shape, dtype=bool)
+    for (elow, ehigh) in rois:
+        roi_mask = (elow <= energies) & (energies < ehigh)
+        masks |= roi_mask
+    return masks
 
 
 class InvalidSampleSetFileError(Exception):
