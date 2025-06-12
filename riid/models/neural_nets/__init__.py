@@ -6,7 +6,8 @@ from riid.models.neural_nets.basic import MLPClassifier
 from riid.models.neural_nets.lpe import LabelProportionEstimator
 from riid.models.neural_nets.MLP import MLP
 from riid.models.neural_nets.CNN import CNN
-from riid.models.neural_nets.Transformer import Transformer
+from riid.models.neural_nets.TBNN import TBNN
+from riid.models.neural_nets.BaselineTBNN import BaselineTBNN
 from riid.models.neural_nets.LSTM import LSTMClassifier
 from riid.models.neural_nets.DANN import DANN
 from riid.models.neural_nets.ADDA import ADDA

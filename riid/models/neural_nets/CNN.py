@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, Callback
 from tensorflow.keras.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
@@ -10,7 +10,7 @@ from tensorflow.keras.regularizers import l2
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from time import perf_counter as time
+from time import perf_counter as timer
 
 
 class CNN(PyRIIDModel):
@@ -48,9 +48,9 @@ class CNN(PyRIIDModel):
 
         self.model = None
 
-    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=200, epochs=20,
-            callbacks=None, patience=10**4, es_monitor="val_loss", es_mode="min", es_verbose=0,
-            target_level="Isotope", verbose=False):
+    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=None,
+            callbacks=None, patience=10**9, es_monitor="val_loss", es_mode="min", es_verbose=0,
+            target_level="Isotope", verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -67,9 +67,10 @@ class CNN(PyRIIDModel):
             es_verbose: verbosity level for `EarlyStopping` object
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
+            training_time: whether to terminate early if run exceeds prealloted time
 
         Returns:
-            `tf.History` object.
+            `history` dictionary
 
         Raises:
             `ValueError` when no spectra are provided as input
@@ -115,14 +116,12 @@ class CNN(PyRIIDModel):
                 )(x)
                 x = MaxPooling1D(pool_size=2, name=f"maxpool_{layer}")(x)
                 
-                if self.dropout > 0:
-                    x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
+                x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
 
             x = Flatten(name="flatten")(x)
             for layer, nodes in enumerate(self.dense_layer_sizes):
                 x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
-            if self.dropout > 0:
-                x = Dropout(self.dropout, name="dropout_layer")(x)
+            x = Dropout(self.dropout, name="dropout_layer")(x)
             outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
             self.model = Model(inputs, outputs)
             self.model.compile(loss=self.loss, optimizer=self.optimizer,
@@ -140,7 +139,12 @@ class CNN(PyRIIDModel):
         else:
             callbacks = [es]
 
-        t0 = time()
+        if training_time is not None:
+            callbacks.append(TimeLimitCallback(training_time))
+            if epochs is None:
+                epochs = 10**9
+
+        t0 = timer()
         history = self.model.fit(
             training_dataset,
             epochs=epochs,
@@ -149,7 +153,6 @@ class CNN(PyRIIDModel):
             callbacks=callbacks,
          )
         self.history = history.history
-        self.history["training_time"] = time() - t0
 
         # Update model information
         self._update_info(
@@ -158,7 +161,7 @@ class CNN(PyRIIDModel):
             normalization=training_ss.spectra_state,
         )
 
-        return history
+        return self.history
 
     def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
         """Classify the spectra in the provided `SampleSet`(s).
@@ -190,3 +193,16 @@ class CNN(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
+
+class TimeLimitCallback(Callback):
+    def __init__(self, max_seconds):
+        super().__init__()
+        self.max_seconds = max_seconds
+        self.start_time = None
+
+    def on_train_begin(self, logs=None):
+        self.start_time = timer()
+
+    def on_epoch_end(self, epoch, logs=None):
+        if timer() - self.start_time >= self.max_seconds:
+            self.model.stop_training = True

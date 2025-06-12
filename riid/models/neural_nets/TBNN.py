@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, Callback
 from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, MultiHeadAttention, \
     LayerNormalization, Layer, Conv1D, TimeDistributed, MaxPooling1D
 from tensorflow.keras.losses import CategoricalCrossentropy
@@ -10,14 +10,15 @@ from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from time import perf_counter as time
+from time import perf_counter as timer
 
 
-class Transformer(PyRIIDModel):
-    """Transformer classifier."""
+class TBNN(PyRIIDModel):
+    """Transformer-based neural network classifier."""
     def __init__(self, activation="relu", loss=None, optimizer=None, metrics=None,
-                 final_activation="softmax", embed_mode="linear", embed_dim=None, num_heads=None,
-                 ff_dim=None, num_layers=None, patch_size=None, stride=None, dropout=0):
+                 final_activation="softmax", embed_mode="linear", embed_dim=None,
+                 pos_encoding="learnable", num_heads=None, ff_dim=None, num_layers=None,
+                 patch_size=None, stride=None, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -27,6 +28,7 @@ class Transformer(PyRIIDModel):
             final_activation: final activation function to apply to model output
             embed_mode: mode for performing the embedding
             embed_dim: size of the embedding vector
+            pos_encoding: whether to use `learnable` or `sinusoidal` positional encodings
             num_heads: number of attention heads
             ff_dim: dimension of feed-forward network
             num_layers: number of transformer blocks
@@ -43,19 +45,20 @@ class Transformer(PyRIIDModel):
         self.final_activation = final_activation
 
         self.embed_mode = embed_mode.lower()
-        self.embed_dim = embed_dim
+        self.embed_dim = embed_dim or patch_size
+        self.pos_encoding = pos_encoding.lower()
         self.num_heads = num_heads
         self.ff_dim = ff_dim
         self.num_layers = num_layers
         self.patch_size = patch_size
-        self.stride = stride or self.patch_size
+        self.stride = stride or patch_size
         self.dropout = dropout
 
         self.model = None
 
-    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=20,
-            callbacks=None, patience=10**4, es_monitor="val_loss", es_mode="min", es_verbose=0,
-            target_level="Isotope", verbose=False):
+    def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=None,
+            callbacks=None, patience=10**9, es_monitor="val_loss", es_mode="min", es_verbose=0,
+            target_level="Isotope", verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -72,9 +75,10 @@ class Transformer(PyRIIDModel):
             es_verbose: verbosity level for `EarlyStopping` object
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
+            training_time: whether to terminate early if run exceeds prealloted time
 
         Returns:
-            `tf.History` object.
+            `history` dictionary
 
         Raises:
             `ValueError` when no spectra are provided as input
@@ -214,21 +218,32 @@ class Transformer(PyRIIDModel):
             
             num_patches = (input_shape - self.patch_size) // self.stride + 1
 
-            pos_indices = Lambda(
-                make_positions,
-                arguments={"num_patches": num_patches},
-                name="make_positions"
-            )(x)
+            if self.pos_encoding == "learnable":
+                pos_indices = Lambda(
+                    make_positions,
+                    arguments={"num_patches": num_patches},
+                    name="make_positions"
+                )(x)
+    
+                pos_embed = Embedding(
+                    input_dim=num_patches,
+                    output_dim=self.embed_dim,
+                    name="position_embedding"
+                )(pos_indices)
+                
+            elif self.pos_encoding == "sinusoidal":
+                pos_embed = Lambda(
+                    add_sinusoidal_pos,
+                    arguments={"num_patches": num_patches, "embed_dim": self.embed_dim},
+                    output_shape=(num_patches, self.embed_dim),
+                    name="sinusoidal_pos"
+                )(x)
 
-            pos_embed = Embedding(
-                input_dim=num_patches,
-                output_dim=self.embed_dim,
-                name="position_embedding"
-            )(pos_indices)
+            else:
+                raise ValueError("`pos_encoding` must be 'learnable' or 'sinusoidal'")
 
             x = Add(name="add_pos")([x, pos_embed])
-            if self.dropout > 0:
-                x = Dropout(self.dropout)(x)
+            x = Dropout(self.dropout)(x)
 
             x = ClassToken(self.embed_dim, name="class_token")(x)
 
@@ -237,22 +252,18 @@ class Transformer(PyRIIDModel):
                 y = MultiHeadAttention(num_heads=self.num_heads,
                         key_dim=self.embed_dim // self.num_heads,
                         name=f"multi_head_attention_{layer}")(y, y)
-                if self.dropout > 0:
-                    y = Dropout(self.dropout, name=f"mha_dropout_{layer}")(y)
+                y = Dropout(self.dropout, name=f"mha_dropout_{layer}")(y)
                 x = x + y
 
                 y = LayerNormalization(epsilon=1e-6, name=f"pre_ffn_layernorm_{layer}")(x)
                 y = Dense(self.ff_dim, activation=self.activation, name=f"ffn_dense1_{layer}")(y)
-                if self.dropout > 0:
-                    y = Dropout(self.dropout, name=f"ffn_dropout1_{layer}")(y)
+                y = Dropout(self.dropout, name=f"ffn_dropout1_{layer}")(y)
                 y = Dense(self.embed_dim, name=f"ffn_dense2_{layer}")(y)
-                if self.dropout > 0:
-                    y = Dropout(self.dropout, name=f"ffn_dropout2_{layer}")(y)
+                y = Dropout(self.dropout, name=f"ffn_dropout2_{layer}")(y)
                 x = x + y
 
             x = Lambda(take_cls_token_fn, name="take_cls_token")(x)
-            if self.dropout > 0:
-                x = Dropout(self.dropout, name="dropout_layer")(x)
+            x = Dropout(self.dropout, name="dropout_layer")(x)
 
             outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
             self.model = Model(inputs, outputs)
@@ -271,7 +282,12 @@ class Transformer(PyRIIDModel):
         else:
             callbacks = [es]
 
-        t0 = time()
+        if training_time is not None:
+            callbacks.append(TimeLimitCallback(training_time))
+            if epochs is None:
+                epochs = 10**9
+
+        t0 = timer()
         history = self.model.fit(
             training_dataset,
             epochs=epochs,
@@ -280,7 +296,6 @@ class Transformer(PyRIIDModel):
             callbacks=callbacks,
         )
         self.history = history.history
-        self.history["training_time"] = time() - t0
 
         # Update model information
         self._update_info(
@@ -289,7 +304,7 @@ class Transformer(PyRIIDModel):
             normalization=training_ss.spectra_state,
         )
 
-        return history
+        return self.history
 
     def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
         """Classify the spectra in the provided `SampleSet`(s).
@@ -321,6 +336,19 @@ class Transformer(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
+
+class TimeLimitCallback(Callback):
+    def __init__(self, max_seconds):
+        super().__init__()
+        self.max_seconds = max_seconds
+        self.start_time = None
+
+    def on_train_begin(self, logs=None):
+        self.start_time = timer()
+
+    def on_epoch_end(self, epoch, logs=None):
+        if timer() - self.start_time >= self.max_seconds:
+            self.model.stop_training = True
 
 ### Need to decorate with serialization API to save/load model
 from tensorflow.keras.utils import register_keras_serializable
@@ -365,6 +393,25 @@ def make_positions(x, num_patches):
     batch = tf.shape(x)[0]
     idx = tf.range(num_patches)[tf.newaxis, :]
     return tf.tile(idx, [batch, 1])
+
+@register_keras_serializable(package="Custom", name="add_sinusoidal_pos")
+def add_sinusoidal_pos(x, num_patches, embed_dim):
+    batch = tf.shape(x)[0]
+    pos = tf.cast(tf.range(num_patches)[:, None], tf.float32)
+    i = tf.cast(tf.range(embed_dim)[None, :], tf.float32)
+    
+    angle_rates = 1.0 / tf.pow(10000.0, (2.0 * tf.floor(i/2.0)) / embed_dim)
+    angle_rads  = pos * angle_rates
+    sin_part = tf.sin(angle_rads[:, 0::2])
+    cos_part = tf.cos(angle_rads[:, 1::2])
+
+    pos_encoding = tf.reshape(
+        tf.stack([sin_part, cos_part], axis=-1),
+        (num_patches, embed_dim)
+    )
+    pos_encoding = tf.tile(pos_encoding[None, :, :], [batch, 1, 1])
+    
+    return pos_encoding
 
 @register_keras_serializable(package="Custom", name="add_channel")
 def add_channel(inputs):

@@ -93,7 +93,7 @@ class ADDA(PyRIIDModel):
             training_time: whether to terminate early if run exceeds prealloted time
 
         Returns:
-            `tf.History` object.
+            `history` dictionary
 
         Raises:
             `ValueError` when no spectra are provided as input
