@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dropout, Activation
+from tensorflow.keras.layers import Input, Dropout
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
@@ -12,30 +12,31 @@ from time import perf_counter as timer
 
 class DeepCORAL(PyRIIDModel):
     """Classifier using DeepCORAL domain adaptation."""
-    def __init__(self, optimizer=None, source_model=None, lmbda=1):
+    def __init__(self, optimizer=None, source_model=None, lmbda=1, dropout=0):
         """
         Args:
             optimizer: tensorflow optimizer or optimizer name
             source_model: pretrained source model
             lmbda: weight for the CORAL loss
+            dropout: dropout rate to apply to the adapted model layers
         """
         super().__init__()
 
         self.optimizer = optimizer or Adam(learning_rate=0.001)
         self.lmbda = lmbda
+        self.dropout = dropout
 
         if source_model is not None:
             self.classification_loss = source_model.loss
 
-            # Remove dropout layers for stability
-            def strip_dropout(layer):
+            def modify_dropout(layer):
                 if isinstance(layer, Dropout):
-                    return Activation('linear', name=layer.name)
+                    return Dropout(dropout, name=layer.name)
                 return layer.__class__.from_config(layer.get_config())
             
             self.source_model = clone_model(
                 source_model,
-                clone_function=strip_dropout
+                clone_function=modify_dropout
             )
             self.source_model.build(source_model.input_shape)
             self.source_model.set_weights(source_model.get_weights())

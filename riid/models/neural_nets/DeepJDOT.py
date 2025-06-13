@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dropout, Activation
+from tensorflow.keras.layers import Input, Dropout
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
@@ -13,7 +13,7 @@ from time import perf_counter as timer
 class DeepJDOT(PyRIIDModel):
     """Classifier using DeepJDOT (Deep Joint Distribution Optimal Transport) domain adaptation."""
     def __init__(self, optimizer=None, source_model=None, ot_weight=1.0, sinkhorn_reg=0.1, 
-                 num_sinkhorn_iters=10, jdot_alpha=1.0, jdot_beta=1.0):
+                 num_sinkhorn_iters=10, jdot_alpha=1.0, jdot_beta=1.0, dropout=0):
         """
         Args:
             optimizer: tensorflow optimizer or optimizer name
@@ -23,6 +23,7 @@ class DeepJDOT(PyRIIDModel):
             num_sinkhorn_iters: Number of iterations in the Sinkhorn algorithm.
             jdot_alpha: Weight for the feature-distance term in the cost matrix.
             jdot_beta: Weight for the classification loss term in the cost matrix.
+            dropout: dropout rate to apply to the adapted model layers
         """
         super().__init__()
         self.optimizer = optimizer or Adam(learning_rate=0.001)
@@ -31,19 +32,19 @@ class DeepJDOT(PyRIIDModel):
         self.num_sinkhorn_iters = num_sinkhorn_iters
         self.jdot_alpha = jdot_alpha
         self.jdot_beta = jdot_beta
+        self.dropout = dropout
 
         if source_model is not None:
             self.classification_loss = source_model.loss
 
-            # Remove dropout layers for stability
-            def strip_dropout(layer):
+            def modify_dropout(layer):
                 if isinstance(layer, Dropout):
-                    return Activation('linear', name=layer.name)
+                    return Dropout(self.dropout, name=layer.name)
                 return layer.__class__.from_config(layer.get_config())
             
             self.source_model = clone_model(
                 source_model,
-                clone_function=strip_dropout
+                clone_function=modify_dropout
             )
             self.source_model.build(source_model.input_shape)
             self.source_model.set_weights(source_model.get_weights())
@@ -102,6 +103,10 @@ class DeepJDOT(PyRIIDModel):
             self.model_inputs = (ModelInput.BackgroundSpectrum,)
         else:
             raise ValueError(f"{source_ss.spectra_type} is not supported in this model.")
+
+        if training_time is None:
+            training_time = np.inf
+            epochs = epochs or 20
 
         # Preparing training and validation data
         X_source = source_ss.get_samples().astype("float32")
@@ -409,4 +414,3 @@ class DeepJDOT(PyRIIDModel):
         grads = tape.gradient(total_loss, self.model.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
         return total_loss, class_loss, ot_loss
-        

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Input, Layer, Dropout, Activation
+from tensorflow.keras.layers import Dense, Input, Layer, Dropout
 from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
@@ -15,7 +15,7 @@ class DANN(PyRIIDModel):
     """Domain Adversarial Neural Network classifier."""
     def __init__(self, activation="relu", d_optimizer=None, f_optimizer=None,
                  source_model=None, grl_hidden_layers=None, use_da_scheduler=True,
-                 da_param=10):
+                 da_param=10, dropout=0):
         """
         Args:
             activation: activation function to use for discriminator dense layer
@@ -25,6 +25,7 @@ class DANN(PyRIIDModel):
             grl_hidden_layers: sizes of the gradient reversal dense layers
             use_da_scheduler: whether to use a scheduler for ramping up lambda
             da_param: value for gamma (if using a da scheduler), otherwise value for lambda
+            dropout: dropout rate to apply to the adapted model and discriminator layers
         """
         super().__init__()
 
@@ -38,19 +39,19 @@ class DANN(PyRIIDModel):
         else:
             self.lmbda = da_param
         self.discriminator_loss = BinaryCrossentropy()
+        self.dropout = dropout
 
         if source_model is not None:
             self.classification_loss = source_model.loss
 
-            # Remove dropout layers for stability
-            def strip_dropout(layer):
+            def modify_dropout(layer):
                 if isinstance(layer, Dropout):
-                    return Activation('linear', name=layer.name)
+                    return Dropout(self.dropout, name=layer.name)
                 return layer.__class__.from_config(layer.get_config())
             
             self.source_model = clone_model(
                 source_model,
-                clone_function=strip_dropout
+                clone_function=modify_dropout
             )
             self.source_model.build(source_model.input_shape)
             self.source_model.set_weights(source_model.get_weights())
@@ -190,6 +191,8 @@ class DANN(PyRIIDModel):
         grl = self.grl_layer(inputs)
         for i, nodes in enumerate(self.grl_hidden_layers):
             grl = Dense(nodes, activation=self.activation, name=f"dense_{i}")(grl)
+            if self.dropout > 0:
+                grl = Dropout(self.dropout, name=f"dropout_{i}")(grl)
         output = Dense(1, activation="sigmoid", name="discriminator")(grl)
         self.discriminator = Model(inputs, output, name="Discriminator")
 
@@ -374,7 +377,7 @@ class DANN(PyRIIDModel):
             loss_t = self.discriminator_loss(y_t, d_t)
             domain_loss = loss_s + loss_t
 
-        # gradients only on the discriminator’s weights
+        # gradients only on the discriminator's weights
         grads = tape.gradient(domain_loss, self.discriminator.trainable_variables)
         self.d_optimizer.apply_gradients(zip(grads, self.discriminator.trainable_variables))
         return domain_loss
@@ -390,7 +393,7 @@ class DANN(PyRIIDModel):
             # adversarial loss
             f_t = self.feature_extractor(x_t, training=True)
             d_pred_t = self.discriminator(f_t, training=False)
-            # “fake” label = 0 (we want D to predict “source” on target features)
+            # "fake" label = 0 (we want D to predict "source" on target features)
             fake_labels = tf.zeros_like(d_pred_t)
             adv_loss = self.discriminator_loss(fake_labels, d_pred_t)
 

@@ -16,7 +16,7 @@ from time import perf_counter as timer
 class ADDA(PyRIIDModel):
     """Adversarial Discriminative Domain Adaptation classifier"""            
     def __init__(self, activation="relu", d_optimizer=None, t_optimizer=None,
-                 source_model=None, discriminator_hidden_layers=None):
+                 source_model=None, discriminator_hidden_layers=None, dropout=0):
         """
         Args:
             activation: activation function to use for discriminator dense layer
@@ -24,6 +24,7 @@ class ADDA(PyRIIDModel):
             t_optimizer: tensorflow optimizer or optimizer name to use for training target encoder
             source_model: pretrained source model
             discriminator_hidden_layers: size of the dense layer(s) in the discriminator
+            dropout: dropout rate to apply to target encoder and discriminator layers
         """
         super().__init__()
 
@@ -32,12 +33,11 @@ class ADDA(PyRIIDModel):
         self.t_optimizer = t_optimizer or Adam(learning_rate=0.001)
         self.discriminator_hidden_layers = discriminator_hidden_layers
         self.discriminator_loss = BinaryCrossentropy()
-        # self.discriminator_loss = BinaryCrossentropy(label_smoothing=0.1) # soft labels
+        self.dropout = dropout
 
         if source_model is not None:
             self.classification_loss = source_model.loss
 
-            # Remove dropout layers for stability
             def strip_dropout(layer):
                 if isinstance(layer, Dropout):
                     return Activation('linear', name=layer.name)
@@ -65,10 +65,22 @@ class ADDA(PyRIIDModel):
             classifier_output = all_layers[-1](classifier_input)
             self.source_classifier = Model(inputs=classifier_input, outputs=classifier_output, name="source_classifier")
 
-            self.target_encoder = clone_model(self.source_encoder)
-            self.target_encoder._name = "target_encoder"
-            self.target_encoder.build(self.source_encoder.input_shape)
-            self.target_encoder.set_weights(self.source_encoder.get_weights())
+            def modify_dropout(layer):
+                if isinstance(layer, Dropout):
+                    return Dropout(self.dropout, name=layer.name)
+                return layer.__class__.from_config(layer.get_config())
+            
+            target_source_model = clone_model(
+                source_model,
+                clone_function=modify_dropout
+            )
+            target_source_model.build(source_model.input_shape)
+            target_source_model.set_weights(source_model.get_weights())
+            
+            target_all_layers = target_source_model.layers
+            target_encoder_input = target_source_model.input
+            target_encoder_output = target_all_layers[-2].output
+            self.target_encoder = Model(inputs=target_encoder_input, outputs=target_encoder_output, name="target_encoder")
         else:
             print("WARNING: no pretrained source model was provided")
 
@@ -129,10 +141,6 @@ class ADDA(PyRIIDModel):
         Y_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
         Y_tgt_val = target_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
 
-        ### Isotopic labels
-        isotope_src_val = source_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
-        isotope_tgt_val = target_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
-
         # Domain labels: 0 for source, 1 for target
         domain_source = np.zeros(len(X_source)).reshape(-1, 1)
         domain_target = np.ones(len(X_target)).reshape(-1, 1)
@@ -188,29 +196,15 @@ class ADDA(PyRIIDModel):
               .prefetch(tf.data.AUTOTUNE)
         )
 
-        ### Build discriminator
+        # Build discriminator
         input_shape = self.source_encoder.output_shape[1]
         inputs = Input(shape=(input_shape,), name="features")
         x = inputs
         for layer, nodes in enumerate(self.discriminator_hidden_layers):
             x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
+            if self.dropout > 0:
+                x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
         output = Dense(1, activation="sigmoid", name="discriminator")(x)
-        self.discriminator = Model(inputs, output)
-
-        ### This is what they do in the ADDA paper
-        # from tensorflow.keras.layers import LeakyReLU, Dropout
-        # init = RandomNormal(mean=0.0, stddev=0.02)
-        # inputs = Input(shape=(input_shape,), name="features")
-        # x = inputs
-        
-        # for i, nodes in enumerate(self.discriminator_hidden_layers):
-        #     x = Dense(nodes, kernel_initializer=init, name=f"dense_{i}")(x)
-        #     x = LeakyReLU(negative_slope=0.2, name=f"leakyrelu_{i}")(x)
-        #     x = Dropout(0.3, name=f"dropout_{i}")(x)
-        
-        # output = Dense(1, activation="sigmoid", kernel_initializer=init, name="discriminator")(x)
-        ###
-        
         self.discriminator = Model(inputs, output, name="Discriminator")
 
         # Define ADDA model using target encoder and source classifier
