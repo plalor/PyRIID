@@ -16,9 +16,9 @@ from time import perf_counter as timer
 class TBNN(PyRIIDModel):
     """Transformer-based neural network classifier."""
     def __init__(self, activation="relu", loss=None, optimizer=None, metrics=None,
-                 final_activation="softmax", embed_mode="linear", embed_dim=None,
-                 pos_encoding="learnable", num_heads=None, ff_dim=None, num_layers=None,
-                 patch_size=None, stride=None, dropout=0):
+                 final_activation="softmax", embed_mode="linear", embed_filters=None,
+                 embed_dim=None, pos_encoding="learnable", num_heads=None, ff_dim=None,
+                 num_layers=None, patch_size=None, stride=None, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -27,6 +27,7 @@ class TBNN(PyRIIDModel):
             metrics: list of metrics to be evaluating during training
             final_activation: final activation function to apply to model output
             embed_mode: mode for performing the embedding
+            embed_filters: number of filters for intermediate layers in CNN and MLP embeddings
             embed_dim: size of the embedding vector
             pos_encoding: whether to use `learnable` or `sinusoidal` positional encodings
             num_heads: number of attention heads
@@ -45,6 +46,7 @@ class TBNN(PyRIIDModel):
         self.final_activation = final_activation
 
         self.embed_mode = embed_mode.lower()
+        self.embed_filters = embed_filters
         self.embed_dim = embed_dim or patch_size
         self.pos_encoding = pos_encoding.lower()
         self.num_heads = num_heads
@@ -153,9 +155,10 @@ class TBNN(PyRIIDModel):
 
             # learn a two-layer MLP embedding
             elif self.embed_mode == "mlp_double":
+                self.embed_filters = self.embed_filters or self.embed_dim
                 inputs = Input(shape=(input_shape,1), name="Spectrum")
                 x = Conv1D(
-                  filters=self.ff_dim,
+                  filters=self.embed_filters,
                   kernel_size=self.patch_size,
                   strides=self.stride,
                   padding="valid",
@@ -171,6 +174,7 @@ class TBNN(PyRIIDModel):
 
             # learn a one-layer CNN embedding
             elif self.embed_mode == "cnn_single":
+                self.embed_filters = self.embed_filters or 16
                 inputs = Input(shape=(input_shape,), name="Spectrum")
 
                 patches = Lambda(
@@ -182,7 +186,7 @@ class TBNN(PyRIIDModel):
 
                 def make_patch_cnn_single():
                     return Sequential([
-                        Conv1D(16, kernel_size=3, padding="same", activation=self.activation),
+                        Conv1D(self.embed_filters, kernel_size=3, padding="same", activation=self.activation),
                         tf.keras.layers.MaxPooling1D(pool_size=2),
                         tf.keras.layers.Flatten(),
                         tf.keras.layers.Dense(self.embed_dim, activation=self.activation)
@@ -192,6 +196,7 @@ class TBNN(PyRIIDModel):
 
             # learn a two-layer CNN embedding
             elif self.embed_mode == "cnn_double":
+                self.embed_filters = self.embed_filters or 16
                 inputs = Input(shape=(input_shape,), name="Spectrum")
 
                 patches = Lambda(
@@ -203,9 +208,9 @@ class TBNN(PyRIIDModel):
 
                 def make_patch_cnn_double():
                     return Sequential([
-                        Conv1D(16, kernel_size=3, padding="same", activation=self.activation),
+                        Conv1D(self.embed_filters, kernel_size=3, padding="same", activation=self.activation),
                         tf.keras.layers.MaxPooling1D(pool_size=2),
-                        Conv1D(32, kernel_size=3, padding="same", activation=self.activation),
+                        Conv1D(2 * self.embed_filters, kernel_size=3, padding="same", activation=self.activation),
                         tf.keras.layers.MaxPooling1D(pool_size=2),
                         tf.keras.layers.Flatten(),
                         tf.keras.layers.Dense(self.embed_dim, activation=self.activation)
