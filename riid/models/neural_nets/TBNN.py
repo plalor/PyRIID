@@ -292,12 +292,16 @@ class TBNN(PyRIIDModel):
             if epochs is None:
                 epochs = 10**9
 
+        # For small datasets, we shouldn't perform a validation callback every epoch
+        validation_freq = max(1, int(np.sqrt(len(X_validation) / len(X_train))))
+
         t0 = timer()
         history = self.model.fit(
             training_dataset,
             epochs=epochs,
             verbose=verbose,
             validation_data=validation_dataset,
+            validation_freq=validation_freq,
             callbacks=callbacks,
         )
         self.history = history.history
