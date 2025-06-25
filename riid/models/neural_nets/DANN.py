@@ -235,7 +235,7 @@ class DANN(PyRIIDModel):
                 if epochs is not None:
                     p = epoch / epochs
                 else:
-                    p = epoch / 1000
+                    p = epoch / 10
                 new_lmbda = 2.0 / (1.0 + np.exp(-self.gamma * p)) - 1.0
             else:
                 new_lmbda = self.lmbda
