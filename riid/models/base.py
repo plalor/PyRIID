@@ -22,7 +22,7 @@ from riid.data.labeling import label_to_index_element
 from riid.losses import mish
 from riid.losses.sparsemax import sparsemax
 from riid.metrics import multi_f1, single_f1, APE_score
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 
 get_custom_objects().update({
     "multi_f1": multi_f1,
@@ -283,6 +283,13 @@ class PyRIIDModel:
         accuracy = accuracy_score(labels, predictions)
         return accuracy
 
+    def calc_f1_score(self, ss: SampleSet, target_level="Isotope", average="weighted", batch_size: int = 1000):
+        """Calculate the f1 score on ss"""
+        self.predict(ss, batch_size=batch_size)
+        labels = ss.get_labels()
+        predictions = ss.get_predictions()
+        score = f1_score(labels, predictions, average=average)
+        return score
 
 class PyRIIDModelJsonEncoder(json.JSONEncoder):
     """Custom JSON encoder for saving models.
