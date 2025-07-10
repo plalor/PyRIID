@@ -26,7 +26,7 @@ class ADDA(PyRIIDModel):
             source_model: pretrained source model
             discriminator_hidden_layers: size of the dense layer(s) in the discriminator
             dropout: optional droupout layer after each hidden layer
-            metrics: dict of metric functions {name: function}
+            metrics: list of metric functions
         """
         super().__init__()
 
@@ -36,7 +36,10 @@ class ADDA(PyRIIDModel):
         self.discriminator_hidden_layers = discriminator_hidden_layers
         self.discriminator_loss = BinaryCrossentropy()
         self.dropout = dropout
-        self.metrics = metrics or {}
+        if metrics:
+            self.metrics = {getattr(metric, '__name__', str(metric)): metric for metric in metrics}
+        else:
+            self.metrics = {}
 
         if source_model is not None:
             self.classification_loss = source_model.loss

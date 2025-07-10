@@ -20,14 +20,17 @@ class DeepCORAL(PyRIIDModel):
             source_model: pretrained source model
             lmbda: weight for the CORAL loss
             dropout: dropout rate to apply to the adapted model layers
-            metrics: dict of metric functions {name: function}
+            metrics: list of metric functions
         """
         super().__init__()
 
         self.optimizer = optimizer or Adam(learning_rate=0.001)
         self.lmbda = lmbda
         self.dropout = dropout
-        self.metrics = metrics or {}
+        if metrics:
+            self.metrics = {getattr(metric, '__name__', str(metric)): metric for metric in metrics}
+        else:
+            self.metrics = {}
 
         if source_model is not None:
             self.classification_loss = source_model.loss

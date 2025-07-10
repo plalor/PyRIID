@@ -26,7 +26,7 @@ class DANN(PyRIIDModel):
             use_da_scheduler: whether to use a scheduler for ramping up lambda
             da_param: value for gamma (if using a da scheduler), otherwise value for lambda
             dropout: dropout rate to apply to the adapted model and discriminator layers
-            metrics: dict of metric functions {name: function}
+            metrics: list of metric functions
         """
         super().__init__()
 
@@ -41,7 +41,10 @@ class DANN(PyRIIDModel):
             self.lmbda = da_param
         self.discriminator_loss = BinaryCrossentropy()
         self.dropout = dropout
-        self.metrics = metrics or {}
+        if metrics:
+            self.metrics = {getattr(metric, '__name__', str(metric)): metric for metric in metrics}
+        else:
+            self.metrics = {}
 
         if source_model is not None:
             self.classification_loss = source_model.loss

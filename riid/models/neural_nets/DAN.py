@@ -25,7 +25,7 @@ class DAN(PyRIIDModel):
             kernel_num: number of RBF kernels in the bank
             kernel_mul: geometric spacing between successive kernels
             dropout: dropout rate to apply to the adapted model layers
-            metrics: dict of metric functions {name: function}
+            metrics: list of metric functions
         """
         super().__init__()
 
@@ -35,7 +35,10 @@ class DAN(PyRIIDModel):
         self.kernel_num = kernel_num
         self.kernel_mul = kernel_mul
         self.dropout = dropout
-        self.metrics = metrics or {}
+        if metrics:
+            self.metrics = {getattr(metric, '__name__', str(metric)): metric for metric in metrics}
+        else:
+            self.metrics = {}
 
         if source_model is not None:
             self.classification_loss = source_model.loss
