@@ -52,6 +52,58 @@ def APE_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return ape
 
 
+def accuracy_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Calculate the accuracy score between true and predicted labels.
+    
+    Args:
+        y_true: Ground truth labels as probability distributions of shape (n_samples, n_classes)
+        y_pred: Predicted labels as probability distributions of shape (n_samples, n_classes)
+        
+    Returns:
+        Accuracy score as a float between 0 and 1
+    """
+    from keras.api import ops
+    
+    y_true_classes = ops.argmax(y_true, axis=-1)
+    y_pred_classes = ops.argmax(y_pred, axis=-1)
+    correct = ops.cast(ops.equal(y_true_classes, y_pred_classes), 'float32')
+    return ops.mean(correct)
+
+
+def f1_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Calculate the weighted F1 score between true and predicted labels.
+    
+    This implementation matches sklearn's f1_score with average="weighted".
+    The F1 score for each class is weighted by the number of true instances of that class.
+    
+    Args:
+        y_true: Ground truth labels as probability distributions of shape (n_samples, n_classes)
+        y_pred: Predicted labels as probability distributions of shape (n_samples, n_classes)
+        
+    Returns:
+        Weighted F1 score as a float between 0 and 1
+    """
+    from keras.api import ops
+    
+    y_true_classes = ops.argmax(y_true, axis=-1)
+    y_pred_classes = ops.argmax(y_pred, axis=-1)
+    n_classes = ops.shape(y_true)[-1]
+    
+    true_onehot = ops.one_hot(y_true_classes, n_classes)
+    pred_onehot = ops.one_hot(y_pred_classes, n_classes)
+    
+    tp = ops.sum(true_onehot * pred_onehot, axis=0)
+    fp = ops.sum((1 - true_onehot) * pred_onehot, axis=0)
+    fn = ops.sum(true_onehot * (1 - pred_onehot), axis=0)
+    
+    precision = tp / (tp + fp + 1e-7)
+    recall = tp / (tp + fn + 1e-7)
+    f1_per_class = 2 * precision * recall / (precision + recall + 1e-7)
+    
+    support = ops.sum(true_onehot, axis=0)
+    return ops.sum(f1_per_class * support) / (ops.sum(support) + 1e-7)
+
+
 def single_f1(y_true: np.ndarray, y_pred: np.ndarray):
     """Compute the weighted F1 score for the maximum prediction and maximum ground truth.
 
