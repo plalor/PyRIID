@@ -12,19 +12,22 @@ from time import perf_counter as timer
 
 class DeepCORAL(PyRIIDModel):
     """Classifier using DeepCORAL domain adaptation."""
-    def __init__(self, optimizer=None, source_model=None, lmbda=1, dropout=0):
+    def __init__(self, optimizer=None, source_model=None, lmbda=1, dropout=0, 
+                 metrics=None):
         """
         Args:
             optimizer: tensorflow optimizer or optimizer name
             source_model: pretrained source model
             lmbda: weight for the CORAL loss
             dropout: dropout rate to apply to the adapted model layers
+            metrics: dict of metric functions {name: function}
         """
         super().__init__()
 
         self.optimizer = optimizer or Adam(learning_rate=0.001)
         self.lmbda = lmbda
         self.dropout = dropout
+        self.metrics = metrics or {}
 
         if source_model is not None:
             self.classification_loss = source_model.loss
@@ -58,7 +61,7 @@ class DeepCORAL(PyRIIDModel):
             print("WARNING: no pretrained source model was provided")
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
-            batch_size=64, epochs=None, patience=None, target_level="Isotope", verbose=False, training_time=None):
+            batch_size=64, epochs=None, patience=None, es_mode="min", es_monitor="tgt_val_loss", target_level="Isotope", verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -185,7 +188,12 @@ class DeepCORAL(PyRIIDModel):
 
         # Training loop
         self.history = {"total_loss": [], "class_loss": [], "coral_loss": [], "src_val_loss": [], "tgt_val_loss": [], "coral_val_loss": []}
-        best_val_loss = np.inf
+        for metric in self.metrics:
+            metric_name = getattr(metric, '__name__', str(metric))
+            self.history[f"src_val_{metric_name}"] = []
+            self.history[f"tgt_val_{metric_name}"] = []
+        
+        best_metric = np.inf if es_mode == "min" else -np.inf
         best_weights = None
         wait = 0
         epoch = 0
@@ -218,24 +226,33 @@ class DeepCORAL(PyRIIDModel):
             src_class_loss_avg = tf.keras.metrics.Mean()
             tgt_class_loss_avg = tf.keras.metrics.Mean()
             coral_val_loss_avg = tf.keras.metrics.Mean()
+            
+            src_metric_avgs = {name: tf.keras.metrics.Mean() for name in self.metrics}
+            tgt_metric_avgs = {name: tf.keras.metrics.Mean() for name in self.metrics}
+            
             for (x_s_val, y_s_val), (x_t_val, y_t_val) in val_dataset:
                 y_s_pred = self.model(x_s_val, training=False)
-                loss_s  = self.classification_loss(y_s_val, y_s_pred)
+                loss_s = self.classification_loss(y_s_val, y_s_pred)
                 src_class_loss_avg.update_state(loss_s)
-            
+                
                 y_t_pred = self.model(x_t_val, training=False)
-                loss_t  = self.classification_loss(y_t_val, y_t_pred)
+                loss_t = self.classification_loss(y_t_val, y_t_pred)
                 tgt_class_loss_avg.update_state(loss_t)
                 
                 f_s_val = self.feature_extractor(x_s_val, training=False)
                 f_t_val = self.feature_extractor(x_t_val, training=False)
                 coral_val_loss = self.coral_loss(f_s_val, f_t_val)
                 coral_val_loss_avg.update_state(coral_val_loss)
+                
+                for metric_name, metric_fn in self.metrics.items():
+                    src_metric = metric_fn(y_s_val.numpy(), y_s_pred.numpy())
+                    tgt_metric = metric_fn(y_t_val.numpy(), y_t_pred.numpy())
+                    src_metric_avgs[metric_name].update_state(src_metric)
+                    tgt_metric_avgs[metric_name].update_state(tgt_metric)
 
             total_loss = total_loss_avg.result().numpy()
             class_loss = class_loss_avg.result().numpy()
             coral_loss = coral_loss_avg.result().numpy()
-
             src_val_loss = src_class_loss_avg.result().numpy()
             tgt_val_loss = tgt_class_loss_avg.result().numpy()
             coral_val_loss = coral_val_loss_avg.result().numpy()
@@ -246,6 +263,11 @@ class DeepCORAL(PyRIIDModel):
             self.history["src_val_loss"].append(src_val_loss)
             self.history["tgt_val_loss"].append(tgt_val_loss)
             self.history["coral_val_loss"].append(coral_val_loss)
+            
+            for metric in self.metrics:
+                metric_name = getattr(metric, '__name__', str(metric))
+                self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric].result().numpy())
+                self.history[f"tgt_val_{metric_name}"].append(tgt_metric_avgs[metric].result().numpy())
 
             if verbose:
                 print(f"Finished in {timer()-t1:.0f} seconds")
@@ -257,9 +279,11 @@ class DeepCORAL(PyRIIDModel):
                       f"tgt_val_loss: {tgt_val_loss:.3g} - "
                       f"coral_val_loss: {coral_val_loss:.3g}")
 
-            # Save best model weights based on the validation loss
-            if tgt_val_loss < best_val_loss:
-                best_val_loss = tgt_val_loss
+            current_metric = self.history[es_monitor][-1]
+            is_better = current_metric < best_metric if es_mode == "min" else current_metric > best_metric
+            
+            if is_better:
+                best_metric = current_metric
                 best_weights = self.model.get_weights()
                 wait = 0
             else:
