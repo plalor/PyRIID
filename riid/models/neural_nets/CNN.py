@@ -116,12 +116,12 @@ class CNN(PyRIIDModel):
                 )(x)
                 x = MaxPooling1D(pool_size=2, name=f"maxpool_{layer}")(x)
                 
-                x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
+                x = Dropout(self.dropout, name=f"conv_dropout_{layer}")(x)
 
             x = Flatten(name="flatten")(x)
             for layer, nodes in enumerate(self.dense_layer_sizes):
                 x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
-                x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
+                x = Dropout(self.dropout, name=f"dense_dropout_{layer}")(x)
             outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
             self.model = Model(inputs, outputs)
             self.model.compile(loss=self.loss, optimizer=self.optimizer,
