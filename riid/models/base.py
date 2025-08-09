@@ -14,7 +14,7 @@ import tensorflow as tf
 import tf2onnx
 from tensorflow.keras.models import Model
 from tensorflow.keras.utils import get_custom_objects
-from tensorflow.keras.losses import cosine_similarity
+from tensorflow.keras.losses import cosine_similarity, categorical_crossentropy
 
 import riid
 from riid import SampleSet, SpectraState
@@ -274,6 +274,15 @@ class PyRIIDModel:
         y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
         loss = self.model.loss(y_true, y_pred).numpy()
         return loss
+
+    def calc_crossentropy(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
+        """Calculate the categorical crossentropy loss on ss (without label smoothing)"""
+        self.predict(ss, batch_size=batch_size)
+        y_true = ss.sources.T.groupby(target_level, sort=False).sum().T.values
+        y_pred = ss.prediction_probas.T.groupby(target_level, sort=False).sum().T.values
+        crossentropy = categorical_crossentropy(y_true, y_pred)
+        crossentropy_loss = tf.reduce_mean(crossentropy).numpy()
+        return crossentropy_loss
 
     def calc_accuracy(self, ss: SampleSet, target_level="Isotope", batch_size: int = 1000):
         """Calculate the accuracy on ss"""

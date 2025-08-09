@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, Callback
-from tensorflow.keras.layers import Dense, Input, Dropout, Conv1D, MaxPooling1D, Flatten
+from tensorflow.keras.layers import Dense, Input, Dropout, SpatialDropout1D, Conv1D, MaxPooling1D, Flatten
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
@@ -115,8 +115,7 @@ class CNN(PyRIIDModel):
                     name=f"conv_{layer}"
                 )(x)
                 x = MaxPooling1D(pool_size=2, name=f"maxpool_{layer}")(x)
-                
-                x = Dropout(self.dropout, name=f"conv_dropout_{layer}")(x)
+                x = SpatialDropout1D(self.dropout, name=f"conv_dropout_{layer}")(x)
 
             x = Flatten(name="flatten")(x)
             for layer, nodes in enumerate(self.dense_layer_sizes):

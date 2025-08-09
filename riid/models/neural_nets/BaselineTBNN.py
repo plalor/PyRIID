@@ -105,13 +105,15 @@ class BaselineTBNN(PyRIIDModel):
             input_shape = X_train.shape[1]
 
             inputs = Input(shape=(input_shape,), name="Spectrum")
+            x = Lambda(zscore, name="zscore")(inputs)
+
             x = Lambda(
                 extract_patches,
                 arguments={"patch_size": self.patch_size, "stride": self.patch_size},
                 name="patch_projection"
-            )(inputs)
+            )(x)
 
-            num_patches = (input_shape - self.patch_size) // self.patch_size + 1
+            num_patches = input_shape // self.patch_size
 
             pos_embed = Lambda(
                 add_sinusoidal_pos,
@@ -124,18 +126,22 @@ class BaselineTBNN(PyRIIDModel):
             x = Dropout(self.dropout)(x)
 
             for layer in range(self.num_layers):
-                attn = MultiHeadAttention(
+                y = MultiHeadAttention(
                     num_heads=self.num_heads,
                     key_dim=self.embed_dim // self.num_heads,
+                    dropout=self.dropout,
                     name=f"mha_{layer}"
                 )(x, x)
-                x = Add(name=f"resid_attn_{layer}")([x, attn])
-                x = LayerNormalization(epsilon=1e-6, name=f"ln1_{layer}")(x)
+                y = Dropout(self.dropout, name=f"drop_attn_{layer}")(y)
+                x = Add(name=f"resid_attn_{layer}")([x, y])
+                x = LayerNormalization(epsilon=1e-6, name=f"ln_attn_{layer}")(x)
 
-                ffn = Dense(self.ff_dim, activation=self.activation, name=f"ffn1_{layer}")(x)
-                ffn = Dense(self.embed_dim, name=f"ffn2_{layer}")(ffn)
-                x = Add(name=f"resid_ffn_{layer}")([x, ffn])
-                x = LayerNormalization(epsilon=1e-6, name=f"ln2_{layer}")(x)
+                y = Dense(self.ff_dim, activation=self.activation, name=f"ffn1_{layer}")(x)
+                y = Dropout(self.dropout, name=f"drop_ffn_in_{layer}")(y)
+                y = Dense(self.embed_dim, name=f"ffn2_{layer}")(y)
+                y = Dropout(self.dropout, name=f"drop_ffn_out_{layer}")(y)
+                x = Add(name=f"resid_ffn_{layer}")([x, y])
+                x = LayerNormalization(epsilon=1e-6, name=f"ln_ffn_{layer}")(x)
 
             x = Flatten(name="flatten_seq")(x)
             x = Dropout(self.dropout, name="dropout_out")(x)
@@ -241,21 +247,20 @@ def extract_patches(x, patch_size, stride):
         axis=1
     )
 
+@register_keras_serializable(package="Custom", name="zscore")
+def zscore(x):
+    m = tf.reduce_mean(x, axis=-1, keepdims=True)
+    s = tf.math.reduce_std(x, axis=-1, keepdims=True)
+    return (x - m) / (s + 1e-6)
+
 @register_keras_serializable(package="Custom", name="add_sinusoidal_pos")
 def add_sinusoidal_pos(x, num_patches, embed_dim):
-    batch = tf.shape(x)[0]
     pos = tf.cast(tf.range(num_patches)[:, None], tf.float32)
     i = tf.cast(tf.range(embed_dim)[None, :], tf.float32)
-    
-    angle_rates = 1.0 / tf.pow(10000.0, (2.0 * tf.floor(i/2.0)) / embed_dim)
-    angle_rads  = pos * angle_rates
-    sin_part = tf.sin(angle_rads[:, 0::2])
-    cos_part = tf.cos(angle_rads[:, 1::2])
-
-    pos_encoding = tf.reshape(
-        tf.stack([sin_part, cos_part], axis=-1),
-        (num_patches, embed_dim)
-    )
-    pos_encoding = tf.tile(pos_encoding[None, :, :], [batch, 1, 1])
-    
-    return pos_encoding
+    angle_rates = 1.0 / tf.pow(10000.0, (2.0 * tf.floor(i/2.0)) / tf.cast(embed_dim, tf.float32))
+    angle_rads = pos * angle_rates
+    sin = tf.sin(angle_rads)
+    cos = tf.cos(angle_rads)
+    even_mask = tf.cast(tf.equal(tf.math.mod(tf.range(embed_dim), 2), 0), tf.float32)[None, :]
+    pos_encoding = sin * even_mask + cos * (1.0 - even_mask)
+    return tf.tile(pos_encoding[None, :, :], [tf.shape(x)[0], 1, 1])

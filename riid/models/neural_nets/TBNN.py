@@ -3,7 +3,7 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, Callback
 from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, MultiHeadAttention, \
-    LayerNormalization, Layer, Conv1D, TimeDistributed, MaxPooling1D
+    LayerNormalization, Layer, Conv1D, SpatialDropout1D, TimeDistributed, MaxPooling1D, Flatten
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.optimizers import Adam
@@ -114,13 +114,8 @@ class TBNN(PyRIIDModel):
         if not self.model:
             input_shape = X_train.shape[1]
 
-            ### Patch embedding: slide a window of size `patch_size` (with step `stride`) over the
-            ### spectrum and project each patch into an `embed_dim`-dimensional token
-
-            # use raw counts as the embedding
             if self.embed_mode == "raw":
                 assert self.embed_dim == self.patch_size
-
                 inputs = Input(shape=(input_shape,), name="Spectrum")
                 x = Lambda(
                     extract_patches,
@@ -128,7 +123,6 @@ class TBNN(PyRIIDModel):
                     name="patch_projection"
                 )(inputs)
 
-            # learn a linear mapping between the counts and the embedding
             elif self.embed_mode == "linear":
                 inputs = Input(shape=(input_shape,1), name="Spectrum")
                 x = Conv1D(
@@ -140,7 +134,6 @@ class TBNN(PyRIIDModel):
                     name="patch_projection"
                 )(inputs)
 
-            # learn a one-layer MLP embedding
             elif self.embed_mode == "mlp_single":
                 inputs = Input(shape=(input_shape,1), name="Spectrum")
                 x = Conv1D(
@@ -153,7 +146,6 @@ class TBNN(PyRIIDModel):
                     name="patch_projection"
                 )(inputs)
 
-            # learn a two-layer MLP embedding
             elif self.embed_mode == "mlp_double":
                 self.embed_filters = self.embed_filters or self.embed_dim
                 inputs = Input(shape=(input_shape,1), name="Spectrum")
@@ -165,110 +157,114 @@ class TBNN(PyRIIDModel):
                   activation=self.activation,
                   name="patch_projection1"
                 )(inputs)
+                x = SpatialDropout1D(self.dropout, name="drop_patch_projection1")(x)
                 x = Conv1D(
                   filters=self.embed_dim,
                   kernel_size=1,
                   activation=self.activation,
                   name="patch_projection2"
                 )(x)
+                x = SpatialDropout1D(self.dropout, name="drop_patch_projection2")(x)
 
-            # learn a one-layer CNN embedding
             elif self.embed_mode == "cnn_single":
                 self.embed_filters = self.embed_filters or 16
                 inputs = Input(shape=(input_shape,), name="Spectrum")
-
                 patches = Lambda(
                     extract_patches,
                     arguments={"patch_size": self.patch_size, "stride": self.stride},
                     name="patch_extraction"
                 )(inputs)
                 patches = Lambda(add_channel, name="add_channel")(patches)
-
                 def make_patch_cnn_single():
                     return Sequential([
                         Conv1D(self.embed_filters, kernel_size=3, padding="same", activation=self.activation),
-                        tf.keras.layers.MaxPooling1D(pool_size=2),
-                        tf.keras.layers.Flatten(),
-                        tf.keras.layers.Dense(self.embed_dim, activation=self.activation)
+                        SpatialDropout1D(self.dropout),
+                        MaxPooling1D(pool_size=2),
+                        Flatten(),
+                        Dense(self.embed_dim, activation=self.activation),
+                        Dropout(self.dropout),
                     ])
-
                 x = TimeDistributed(make_patch_cnn_single(), name="patch_cnn_single")(patches)
 
-            # learn a two-layer CNN embedding
             elif self.embed_mode == "cnn_double":
                 self.embed_filters = self.embed_filters or 16
                 inputs = Input(shape=(input_shape,), name="Spectrum")
-
                 patches = Lambda(
                     extract_patches,
                     arguments={"patch_size": self.patch_size, "stride": self.stride},
                     name="patch_extraction"
                 )(inputs)
                 patches = Lambda(add_channel, name="add_channel")(patches)
-
                 def make_patch_cnn_double():
                     return Sequential([
                         Conv1D(self.embed_filters, kernel_size=3, padding="same", activation=self.activation),
-                        tf.keras.layers.MaxPooling1D(pool_size=2),
+                        SpatialDropout1D(self.dropout),
+                        MaxPooling1D(pool_size=2),
                         Conv1D(2 * self.embed_filters, kernel_size=3, padding="same", activation=self.activation),
-                        tf.keras.layers.MaxPooling1D(pool_size=2),
-                        tf.keras.layers.Flatten(),
-                        tf.keras.layers.Dense(self.embed_dim, activation=self.activation)
+                        SpatialDropout1D(self.dropout),
+                        MaxPooling1D(pool_size=2),
+                        Flatten(),
+                        Dense(self.embed_dim, activation=self.activation),
+                        Dropout(self.dropout),
                     ])
-
                 x = TimeDistributed(make_patch_cnn_double(), name="patch_cnn_double")(patches)
 
             else:
                 raise ValueError("`embed_mode` not understood.")
             
             num_patches = (input_shape - self.patch_size) // self.stride + 1
+            x = SpatialDropout1D(self.dropout, name="drop_embed")(x)
+
+            x = ClassToken(self.embed_dim, name="class_token")(x)
+            num_tokens = num_patches + 1
 
             if self.pos_encoding == "learnable":
                 pos_indices = Lambda(
                     make_positions,
-                    arguments={"num_patches": num_patches},
+                    arguments={"num_patches": num_tokens},
                     name="make_positions"
                 )(x)
-    
                 pos_embed = Embedding(
-                    input_dim=num_patches,
+                    input_dim=num_tokens,
                     output_dim=self.embed_dim,
                     name="position_embedding"
                 )(pos_indices)
-                
+
             elif self.pos_encoding == "sinusoidal":
                 pos_embed = Lambda(
                     add_sinusoidal_pos,
-                    arguments={"num_patches": num_patches, "embed_dim": self.embed_dim},
-                    output_shape=(num_patches, self.embed_dim),
+                    arguments={"num_patches": num_tokens, "embed_dim": self.embed_dim},
+                    output_shape=(num_tokens, self.embed_dim),
                     name="sinusoidal_pos"
                 )(x)
-
+                
             else:
                 raise ValueError("`pos_encoding` must be 'learnable' or 'sinusoidal'")
 
             x = Add(name="add_pos")([x, pos_embed])
-            x = Dropout(self.dropout)(x)
-
-            x = ClassToken(self.embed_dim, name="class_token")(x)
+            x = Dropout(self.dropout, name="drop_tokens")(x)
 
             for layer in range(self.num_layers):
-                y = LayerNormalization(epsilon=1e-6, name=f"pre_mha_layernorm_{layer}")(x)
-                y = MultiHeadAttention(num_heads=self.num_heads,
-                        key_dim=self.embed_dim // self.num_heads,
-                        name=f"multi_head_attention_{layer}")(y, y)
-                y = Dropout(self.dropout, name=f"mha_dropout_{layer}")(y)
-                x = x + y
+                y = LayerNormalization(epsilon=1e-6, name=f"ln_attn_{layer}")(x)
+                y = MultiHeadAttention(
+                    num_heads=self.num_heads,
+                    key_dim=self.embed_dim // self.num_heads,
+                    dropout=self.dropout,
+                    name=f"mha_{layer}"
+                )(y, y)
+                y = Dropout(self.dropout, name=f"drop_attn_{layer}")(y)
+                x = Add(name=f"resid_attn_{layer}")([x, y])
 
-                y = LayerNormalization(epsilon=1e-6, name=f"pre_ffn_layernorm_{layer}")(x)
-                y = Dense(self.ff_dim, activation=self.activation, name=f"ffn_dense1_{layer}")(y)
-                y = Dropout(self.dropout, name=f"ffn_dropout1_{layer}")(y)
-                y = Dense(self.embed_dim, name=f"ffn_dense2_{layer}")(y)
-                y = Dropout(self.dropout, name=f"ffn_dropout2_{layer}")(y)
-                x = x + y
+                y = LayerNormalization(epsilon=1e-6, name=f"ln_ffn_{layer}")(x)
+                y = Dense(self.ff_dim, activation=self.activation, name=f"ffn1_{layer}")(y)
+                y = Dropout(self.dropout, name=f"drop_ffn_in_{layer}")(y)
+                y = Dense(self.embed_dim, name=f"ffn2_{layer}")(y)
+                y = Dropout(self.dropout, name=f"drop_ffn_out_{layer}")(y)
+                x = Add(name=f"resid_ffn_{layer}")([x, y])
 
+            x = LayerNormalization(epsilon=1e-6, name="encoder_norm")(x)
             x = Lambda(take_cls_token_fn, name="take_cls_token")(x)
-            x = Dropout(self.dropout, name="dropout_layer")(x)
+            x = Dropout(self.dropout, name="dropout_out")(x)
 
             outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
             self.model = Model(inputs, outputs)
@@ -405,22 +401,15 @@ def make_positions(x, num_patches):
 
 @register_keras_serializable(package="Custom", name="add_sinusoidal_pos")
 def add_sinusoidal_pos(x, num_patches, embed_dim):
-    batch = tf.shape(x)[0]
     pos = tf.cast(tf.range(num_patches)[:, None], tf.float32)
     i = tf.cast(tf.range(embed_dim)[None, :], tf.float32)
-    
-    angle_rates = 1.0 / tf.pow(10000.0, (2.0 * tf.floor(i/2.0)) / embed_dim)
-    angle_rads  = pos * angle_rates
-    sin_part = tf.sin(angle_rads[:, 0::2])
-    cos_part = tf.cos(angle_rads[:, 1::2])
-
-    pos_encoding = tf.reshape(
-        tf.stack([sin_part, cos_part], axis=-1),
-        (num_patches, embed_dim)
-    )
-    pos_encoding = tf.tile(pos_encoding[None, :, :], [batch, 1, 1])
-    
-    return pos_encoding
+    angle_rates = 1.0 / tf.pow(10000.0, (2.0 * tf.floor(i/2.0)) / tf.cast(embed_dim, tf.float32))
+    angle_rads = pos * angle_rates
+    sin = tf.sin(angle_rads)
+    cos = tf.cos(angle_rads)
+    even_mask = tf.cast(tf.equal(tf.math.mod(tf.range(embed_dim), 2), 0), tf.float32)[None, :]
+    pos_encoding = sin * even_mask + cos * (1.0 - even_mask)
+    return tf.tile(pos_encoding[None, :, :], [tf.shape(x)[0], 1, 1])
 
 @register_keras_serializable(package="Custom", name="add_channel")
 def add_channel(inputs):
