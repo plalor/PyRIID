@@ -133,6 +133,7 @@ class TBNN(PyRIIDModel):
                     use_bias=True,
                     name="patch_projection"
                 )(inputs)
+                x = SpatialDropout1D(self.dropout, name="drop_patch_projection")(x)
 
             elif self.embed_mode == "mlp_single":
                 inputs = Input(shape=(input_shape,1), name="Spectrum")
@@ -145,6 +146,7 @@ class TBNN(PyRIIDModel):
                     activation=self.activation,
                     name="patch_projection"
                 )(inputs)
+                x = SpatialDropout1D(self.dropout, name="drop_patch_projection")(x)
 
             elif self.embed_mode == "mlp_double":
                 self.embed_filters = self.embed_filters or self.embed_dim
@@ -213,7 +215,6 @@ class TBNN(PyRIIDModel):
                 raise ValueError("`embed_mode` not understood.")
             
             num_patches = (input_shape - self.patch_size) // self.stride + 1
-            x = SpatialDropout1D(self.dropout, name="drop_embed")(x)
 
             x = ClassToken(self.embed_dim, name="class_token")(x)
             num_tokens = num_patches + 1
