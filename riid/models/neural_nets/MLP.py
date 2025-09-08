@@ -136,9 +136,8 @@ class MLP(PyRIIDModel):
                 epochs = 10**9
 
         # For small datasets, we shouldn't perform a validation callback every epoch
-        validation_freq = max(1, int(np.sqrt(len(X_validation) / len(X_train))))
+        validation_freq = max(1, int((len(X_validation) / len(X_train))**0.3))
 
-        t0 = timer()
         history = self.model.fit(
             training_dataset,
             epochs=epochs,
