@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, Callback
-from tensorflow.keras.layers import Dense, Input, Dropout
+from tensorflow.keras.layers import Dense, Input, Dropout, Lambda
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
@@ -47,7 +47,7 @@ class MLP(PyRIIDModel):
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=None,
             callbacks=None, patience=10**9, es_monitor="val_loss", es_mode="min", es_verbose=0,
-            target_level="Isotope", verbose=False, training_time=None):
+            target_level="Isotope", verbose=False, training_time=None, normalize=True):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -65,6 +65,7 @@ class MLP(PyRIIDModel):
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
             training_time: whether to terminate early if run exceeds prealloted time
+            normalize: whether to apply z-score normalization to input spectra
 
         Returns:
             `history` dictionary
@@ -101,7 +102,7 @@ class MLP(PyRIIDModel):
         if not self.model:
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
-            x = inputs
+            x = Lambda(zscore, name="zscore")(inputs) if normalize else inputs
             for layer, nodes in enumerate(self.hidden_layers):
                 x = Dense(
                     nodes,
@@ -200,3 +201,12 @@ class TimeLimitCallback(Callback):
     def on_epoch_end(self, epoch, logs=None):
         if timer() - self.start_time >= self.max_seconds:
             self.model.stop_training = True
+
+### Need to decorate with serialization API to save/load model
+from tensorflow.keras.utils import register_keras_serializable
+
+@register_keras_serializable(package="Custom", name="zscore")
+def zscore(x):
+    m = tf.reduce_mean(x, axis=-1, keepdims=True)
+    s = tf.math.reduce_std(x, axis=-1, keepdims=True)
+    return (x - m) / s

@@ -50,7 +50,7 @@ class BaselineTBNN(PyRIIDModel):
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=None,
             callbacks=None, patience=10**9, es_monitor="val_loss", es_mode="min", es_verbose=0,
-            target_level="Isotope", verbose=False, training_time=None):
+            target_level="Isotope", verbose=False, training_time=None, normalize=True):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -68,6 +68,7 @@ class BaselineTBNN(PyRIIDModel):
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
             training_time: whether to terminate early if run exceeds prealloted time
+            normalize: whether to apply z-score normalization to input spectra
 
         Returns:
             `history` dictionary
@@ -105,7 +106,7 @@ class BaselineTBNN(PyRIIDModel):
             input_shape = X_train.shape[1]
 
             inputs = Input(shape=(input_shape,), name="Spectrum")
-            x = Lambda(zscore, name="zscore")(inputs)
+            x = Lambda(zscore, name="zscore")(inputs) if normalize else inputs
 
             x = Lambda(
                 extract_patches,
@@ -250,7 +251,7 @@ def extract_patches(x, patch_size, stride):
 def zscore(x):
     m = tf.reduce_mean(x, axis=-1, keepdims=True)
     s = tf.math.reduce_std(x, axis=-1, keepdims=True)
-    return (x - m) / (s + 1e-6)
+    return (x - m) / s
 
 @register_keras_serializable(package="Custom", name="add_sinusoidal_pos")
 def add_sinusoidal_pos(x, num_patches, embed_dim):

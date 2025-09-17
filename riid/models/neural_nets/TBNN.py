@@ -60,7 +60,7 @@ class TBNN(PyRIIDModel):
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=None,
             callbacks=None, patience=10**9, es_monitor="val_loss", es_mode="min", es_verbose=0,
-            target_level="Isotope", verbose=False, training_time=None):
+            target_level="Isotope", verbose=False, training_time=None, normalize=True):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -78,6 +78,7 @@ class TBNN(PyRIIDModel):
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
             training_time: whether to terminate early if run exceeds prealloted time
+            normalize: whether to apply z-score normalization to input spectra
 
         Returns:
             `history` dictionary
@@ -113,18 +114,20 @@ class TBNN(PyRIIDModel):
 
         if not self.model:
             input_shape = X_train.shape[1]
+            
+            inputs = Input(shape=(input_shape,), name="Spectrum")
+            x = Lambda(zscore, name="zscore")(inputs) if normalize else inputs
 
             if self.embed_mode == "raw":
                 assert self.embed_dim == self.patch_size
-                inputs = Input(shape=(input_shape,), name="Spectrum")
                 x = Lambda(
                     extract_patches,
                     arguments={"patch_size": self.patch_size, "stride": self.stride},
                     name="patch_projection"
-                )(inputs)
+                )(x)
 
             elif self.embed_mode == "linear":
-                inputs = Input(shape=(input_shape,1), name="Spectrum")
+                x = Lambda(add_channel, name="add_channel")(x)
                 x = Conv1D(
                     filters=self.embed_dim,
                     kernel_size=self.patch_size,
@@ -132,11 +135,11 @@ class TBNN(PyRIIDModel):
                     padding="valid",
                     use_bias=True,
                     name="patch_projection"
-                )(inputs)
+                )(x)
                 x = SpatialDropout1D(self.dropout, name="drop_patch_projection")(x)
 
             elif self.embed_mode == "mlp_single":
-                inputs = Input(shape=(input_shape,1), name="Spectrum")
+                x = Lambda(add_channel, name="add_channel")(x)
                 x = Conv1D(
                     filters=self.embed_dim,
                     kernel_size=self.patch_size,
@@ -145,12 +148,12 @@ class TBNN(PyRIIDModel):
                     use_bias=True,
                     activation=self.activation,
                     name="patch_projection"
-                )(inputs)
+                )(x)
                 x = SpatialDropout1D(self.dropout, name="drop_patch_projection")(x)
 
             elif self.embed_mode == "mlp_double":
                 self.embed_filters = self.embed_filters or self.embed_dim
-                inputs = Input(shape=(input_shape,1), name="Spectrum")
+                x = Lambda(add_channel, name="add_channel")(x)
                 x = Conv1D(
                   filters=self.embed_filters,
                   kernel_size=self.patch_size,
@@ -158,7 +161,7 @@ class TBNN(PyRIIDModel):
                   padding="valid",
                   activation=self.activation,
                   name="patch_projection1"
-                )(inputs)
+                )(x)
                 x = SpatialDropout1D(self.dropout, name="drop_patch_projection1")(x)
                 x = Conv1D(
                   filters=self.embed_dim,
@@ -170,12 +173,11 @@ class TBNN(PyRIIDModel):
 
             elif self.embed_mode == "cnn_single":
                 self.embed_filters = self.embed_filters or 16
-                inputs = Input(shape=(input_shape,), name="Spectrum")
                 patches = Lambda(
                     extract_patches,
                     arguments={"patch_size": self.patch_size, "stride": self.stride},
                     name="patch_extraction"
-                )(inputs)
+                )(x)
                 patches = Lambda(add_channel, name="add_channel")(patches)
                 def make_patch_cnn_single():
                     return Sequential([
@@ -190,12 +192,11 @@ class TBNN(PyRIIDModel):
 
             elif self.embed_mode == "cnn_double":
                 self.embed_filters = self.embed_filters or 16
-                inputs = Input(shape=(input_shape,), name="Spectrum")
                 patches = Lambda(
                     extract_patches,
                     arguments={"patch_size": self.patch_size, "stride": self.stride},
                     name="patch_extraction"
-                )(inputs)
+                )(x)
                 patches = Lambda(add_channel, name="add_channel")(patches)
                 def make_patch_cnn_double():
                     return Sequential([
@@ -413,6 +414,10 @@ def add_sinusoidal_pos(x, num_patches, embed_dim):
 
 @register_keras_serializable(package="Custom", name="add_channel")
 def add_channel(inputs):
-    """Function to add a channel dimension (serializable)."""
-    # inputs shape: (batch, num_patches, patch_size)
-    return tf.expand_dims(inputs, -1)  # -> (batch, num_patches, patch_size, 1)
+    return tf.expand_dims(inputs, -1)
+
+@register_keras_serializable(package="Custom", name="zscore")
+def zscore(x):
+    m = tf.reduce_mean(x, axis=-1, keepdims=True)
+    s = tf.math.reduce_std(x, axis=-1, keepdims=True)
+    return (x - m) / s
