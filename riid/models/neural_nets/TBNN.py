@@ -397,8 +397,8 @@ def extract_patches(x, patch_size, stride):
 @register_keras_serializable(package="Custom", name="make_positions")
 def make_positions(x, num_patches):
     batch = tf.shape(x)[0]
-    idx = tf.range(num_patches)[tf.newaxis, :]
-    return tf.tile(idx, [batch, 1])
+    idx = tf.range(num_patches, dtype=tf.int32)[tf.newaxis, :]
+    return tf.broadcast_to(idx, [batch, num_patches])
 
 @register_keras_serializable(package="Custom", name="add_sinusoidal_pos")
 def add_sinusoidal_pos(x, num_patches, embed_dim):
@@ -408,9 +408,10 @@ def add_sinusoidal_pos(x, num_patches, embed_dim):
     angle_rads = pos * angle_rates
     sin = tf.sin(angle_rads)
     cos = tf.cos(angle_rads)
-    even_mask = tf.cast(tf.equal(tf.math.mod(tf.range(embed_dim), 2), 0), tf.float32)[None, :]
+    even_mask = tf.cast(tf.equal(tf.math.floormod(tf.range(embed_dim), 2), 0), tf.float32)[None, :]
     pos_encoding = sin * even_mask + cos * (1.0 - even_mask)
-    return tf.tile(pos_encoding[None, :, :], [tf.shape(x)[0], 1, 1])
+    pos_encoding = pos_encoding[tf.newaxis, ...]
+    return tf.broadcast_to(pos_encoding, [tf.shape(x)[0], num_patches, embed_dim])
 
 @register_keras_serializable(package="Custom", name="add_channel")
 def add_channel(inputs):

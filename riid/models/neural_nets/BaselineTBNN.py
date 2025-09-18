@@ -261,6 +261,7 @@ def add_sinusoidal_pos(x, num_patches, embed_dim):
     angle_rads = pos * angle_rates
     sin = tf.sin(angle_rads)
     cos = tf.cos(angle_rads)
-    even_mask = tf.cast(tf.equal(tf.math.mod(tf.range(embed_dim), 2), 0), tf.float32)[None, :]
+    even_mask = tf.cast(tf.equal(tf.math.floormod(tf.range(embed_dim), 2), 0), tf.float32)[None, :]
     pos_encoding = sin * even_mask + cos * (1.0 - even_mask)
-    return tf.tile(pos_encoding[None, :, :], [tf.shape(x)[0], 1, 1])
+    pos_encoding = pos_encoding[tf.newaxis, ...]
+    return tf.broadcast_to(pos_encoding, [tf.shape(x)[0], num_patches, embed_dim])
