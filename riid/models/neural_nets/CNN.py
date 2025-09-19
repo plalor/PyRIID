@@ -18,7 +18,8 @@ class CNN(PyRIIDModel):
     def __init__(self, activation="relu", loss=None, optimizer=None,
                  metrics=None, l2_alpha=None, activity_regularizer=None,
                  final_activation="softmax", convolutional_layers=None,
-                 dense_layer_sizes=None, dropout=0):
+                 dense_layer_sizes=None, dropout=0,
+                 padding="valid", flatten=True):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -45,13 +46,14 @@ class CNN(PyRIIDModel):
         self.convolutional_layers = convolutional_layers
         self.dense_layer_sizes = dense_layer_sizes
         self.dropout = dropout
+        self.padding = padding
+        self.flatten = flatten
 
         self.model = None
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=None,
             callbacks=None, patience=10**9, es_monitor="val_loss", es_mode="min", es_verbose=0,
-            target_level="Isotope", verbose=False, training_time=None, normalize=True,
-            padding="valid", flatten=True):
+            target_level="Isotope", verbose=False, training_time=None, normalize=True):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -112,7 +114,7 @@ class CNN(PyRIIDModel):
                 x = Conv1D(
                     filters=filters,
                     kernel_size=kernel_size,
-                    padding=padding,
+                    padding=self.padding,
                     activation=self.activation,
                     activity_regularizer=self.activity_regularizer,
                     kernel_regularizer=self.kernel_regularizer,
@@ -121,7 +123,7 @@ class CNN(PyRIIDModel):
                 x = MaxPooling1D(pool_size=2, name=f"maxpool_{layer}")(x)
                 x = SpatialDropout1D(self.dropout, name=f"conv_dropout_{layer}")(x)
 
-            if flatten:
+            if self.flatten:
                 x = Flatten(name="flatten")(x)
             else:
                 x = GlobalAveragePooling1D(name="global_avg_pool")(x)
