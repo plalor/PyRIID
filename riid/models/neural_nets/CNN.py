@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, Callback
-from tensorflow.keras.layers import Dense, Input, Dropout, SpatialDropout1D, Conv1D, MaxPooling1D, Flatten, Lambda, GlobalAveragePooling1D
+from tensorflow.keras.layers import Dense, Input, Dropout, SpatialDropout1D, Conv1D, MaxPooling1D, Flatten, Lambda
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
@@ -19,7 +19,7 @@ class CNN(PyRIIDModel):
                  metrics=None, l2_alpha=None, activity_regularizer=None,
                  final_activation="softmax", convolutional_layers=None,
                  dense_layer_sizes=None, dropout=0,
-                 padding="valid", flatten=True):
+                 padding=None, flatten=None):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -46,8 +46,6 @@ class CNN(PyRIIDModel):
         self.convolutional_layers = convolutional_layers
         self.dense_layer_sizes = dense_layer_sizes
         self.dropout = dropout
-        self.padding = padding
-        self.flatten = flatten
 
         self.model = None
 
@@ -114,7 +112,7 @@ class CNN(PyRIIDModel):
                 x = Conv1D(
                     filters=filters,
                     kernel_size=kernel_size,
-                    padding=self.padding,
+                    padding="same",
                     activation=self.activation,
                     activity_regularizer=self.activity_regularizer,
                     kernel_regularizer=self.kernel_regularizer,
@@ -123,10 +121,7 @@ class CNN(PyRIIDModel):
                 x = MaxPooling1D(pool_size=2, name=f"maxpool_{layer}")(x)
                 x = SpatialDropout1D(self.dropout, name=f"conv_dropout_{layer}")(x)
 
-            if self.flatten:
-                x = Flatten(name="flatten")(x)
-            else:
-                x = GlobalAveragePooling1D(name="global_avg_pool")(x)
+            x = Flatten(name="flatten")(x)
             for layer, nodes in enumerate(self.dense_layer_sizes):
                 x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
                 x = Dropout(self.dropout, name=f"dense_dropout_{layer}")(x)
