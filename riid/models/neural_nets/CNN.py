@@ -18,8 +18,7 @@ class CNN(PyRIIDModel):
     def __init__(self, activation="relu", loss=None, optimizer=None,
                  metrics=None, l2_alpha=None, activity_regularizer=None,
                  final_activation="softmax", convolutional_layers=None,
-                 dense_layer_sizes=None, dropout=0,
-                 padding=None, flatten=None):
+                 dense_layer_sizes=None, dropout=0):
         """
         Args:
             activation: activation function to use for each dense layer
