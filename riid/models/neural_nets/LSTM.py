@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping, Callback
-from tensorflow.keras.layers import Dense, Input, Dropout, Reshape, LSTM, Bidirectional, Lambda
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.layers import Dense, Input, LSTM, Bidirectional, Lambda
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
@@ -10,7 +10,8 @@ from tensorflow.keras.regularizers import l2
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from time import perf_counter as timer
+from riid.models.functions import extract_patches
+from riid.models.callbacks import TimeLimitCallback
 
 
 class LSTMClassifier(PyRIIDModel):
@@ -214,28 +215,3 @@ class LSTMClassifier(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
-
-class TimeLimitCallback(Callback):
-    def __init__(self, max_seconds):
-        super().__init__()
-        self.max_seconds = max_seconds
-        self.start_time = None
-
-    def on_train_begin(self, logs=None):
-        self.start_time = timer()
-
-    def on_epoch_end(self, epoch, logs=None):
-        if timer() - self.start_time >= self.max_seconds:
-            self.model.stop_training = True
-
-### Need to decorate with serialization API to save/load model
-from tensorflow.keras.utils import register_keras_serializable
-
-@register_keras_serializable(package="Custom", name="extract_patches")
-def extract_patches(x, patch_size, stride):
-    return tf.signal.frame(
-        x,
-        frame_length=patch_size,
-        frame_step=stride,
-        axis=1
-    )

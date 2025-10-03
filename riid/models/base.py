@@ -24,12 +24,40 @@ from riid.losses.sparsemax import sparsemax
 from riid.metrics import multi_f1, single_f1, APE_score
 from sklearn.metrics import accuracy_score, f1_score
 
+from riid.models.functions import (
+    zscore, add_channel, extract_patches, add_sinusoidal_pos, 
+    make_positions, take_cls_token_fn
+)
+from riid.models.layers import (
+    ReduceSumLayer, ReduceMaxLayer, DivideLayer, ExpandDimsLayer,
+    ClipByValueLayer, PoissonLogProbabilityLayer, SeedLayer, L1NormLayer,
+    ClassToken, GradientReversalLayer
+)
+
 get_custom_objects().update({
     "multi_f1": multi_f1,
     "single_f1": single_f1,
     "mish": mish,
     "sparsemax": sparsemax,
     "APE_score": APE_score,
+    # Custom functions
+    "zscore": zscore,
+    "add_channel": add_channel,
+    "extract_patches": extract_patches,
+    "add_sinusoidal_pos": add_sinusoidal_pos,
+    "make_positions": make_positions,
+    "take_cls_token_fn": take_cls_token_fn,
+    # Custom layers
+    "ReduceSumLayer": ReduceSumLayer,
+    "ReduceMaxLayer": ReduceMaxLayer,
+    "DivideLayer": DivideLayer,
+    "ExpandDimsLayer": ExpandDimsLayer,
+    "ClipByValueLayer": ClipByValueLayer,
+    "PoissonLogProbabilityLayer": PoissonLogProbabilityLayer,
+    "SeedLayer": SeedLayer,
+    "L1NormLayer": L1NormLayer,
+    "ClassToken": ClassToken,
+    "GradientReversalLayer": GradientReversalLayer,
 })
 
 

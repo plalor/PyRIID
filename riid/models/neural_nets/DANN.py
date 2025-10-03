@@ -1,13 +1,14 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Input, Layer, Dropout
+from tensorflow.keras.layers import Dense, Input, Dropout
 from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
+from riid.models.layers import GradientReversalLayer
 from time import perf_counter as timer
 
 
@@ -429,16 +430,3 @@ class DANN(PyRIIDModel):
         grads = tape.gradient(total_loss, variables)
         self.f_optimizer.apply_gradients(zip(grads, variables))
         return total_loss, class_loss
-
-class GradientReversalLayer(Layer):
-    def __init__(self, **kwargs):
-        super(GradientReversalLayer, self).__init__(**kwargs)
-        self.lmbda = tf.Variable(0.0, trainable=False, dtype=tf.float32)
-
-    def call(self, inputs):
-        @tf.custom_gradient
-        def _reverse_gradient(x):
-            def grad(dy):
-                return -self.lmbda * dy
-            return x, grad
-        return _reverse_gradient(inputs)

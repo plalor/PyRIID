@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping, Callback
+from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Dropout, SpatialDropout1D, Conv1D, MaxPooling1D, Flatten, Lambda
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
@@ -10,7 +10,8 @@ from tensorflow.keras.regularizers import l2
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from time import perf_counter as timer
+from riid.models.functions import zscore, add_channel
+from riid.models.callbacks import TimeLimitCallback
 
 
 class CNN(PyRIIDModel):
@@ -198,29 +199,3 @@ class CNN(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
-
-class TimeLimitCallback(Callback):
-    def __init__(self, max_seconds):
-        super().__init__()
-        self.max_seconds = max_seconds
-        self.start_time = None
-
-    def on_train_begin(self, logs=None):
-        self.start_time = timer()
-
-    def on_epoch_end(self, epoch, logs=None):
-        if timer() - self.start_time >= self.max_seconds:
-            self.model.stop_training = True
-
-### Need to decorate with serialization API to save/load model
-from tensorflow.keras.utils import register_keras_serializable
-
-@register_keras_serializable(package="Custom", name="add_channel")
-def add_channel(inputs):
-    return tf.expand_dims(inputs, -1)
-
-@register_keras_serializable(package="Custom", name="zscore")
-def zscore(x):
-    m = tf.reduce_mean(x, axis=-1, keepdims=True)
-    s = tf.math.reduce_std(x, axis=-1, keepdims=True)
-    return (x - m) / s

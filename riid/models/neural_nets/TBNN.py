@@ -1,16 +1,18 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping, Callback
+from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, MultiHeadAttention, \
-    LayerNormalization, Layer, Conv1D, SpatialDropout1D, TimeDistributed, MaxPooling1D, Flatten
+    LayerNormalization, Conv1D, SpatialDropout1D, TimeDistributed, MaxPooling1D, Flatten
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from time import perf_counter as timer
+from riid.models.functions import zscore, add_channel, extract_patches, add_sinusoidal_pos, make_positions, take_cls_token_fn
+from riid.models.layers import ClassToken
+from riid.models.callbacks import TimeLimitCallback
 
 
 class TBNN(PyRIIDModel):
@@ -342,83 +344,3 @@ class TBNN(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
-
-class TimeLimitCallback(Callback):
-    def __init__(self, max_seconds):
-        super().__init__()
-        self.max_seconds = max_seconds
-        self.start_time = None
-
-    def on_train_begin(self, logs=None):
-        self.start_time = timer()
-
-    def on_epoch_end(self, epoch, logs=None):
-        if timer() - self.start_time >= self.max_seconds:
-            self.model.stop_training = True
-
-### Need to decorate with serialization API to save/load model
-from tensorflow.keras.utils import register_keras_serializable
-
-@register_keras_serializable(package="Custom", name="ClassToken")
-class ClassToken(Layer):
-    def __init__(self, embed_dim, **kwargs):
-        super().__init__(**kwargs)
-        self.embed_dim = embed_dim
-
-    def build(self, input_shape):
-        # input_shape = (batch, num_patches, embed_dim)
-        self.cls_token = self.add_weight(
-            shape=(1, 1, self.embed_dim),
-            initializer="zeros",
-            trainable=True,
-            name="cls_token"
-        )
-        super().build(input_shape)
-
-    def call(self, x):
-        # x.shape = (batch, num_patches, embed_dim)
-        batch_size = tf.shape(x)[0]
-        cls_tokens = tf.tile(self.cls_token, [batch_size, 1, 1])
-        return tf.concat([cls_tokens, x], axis=1)
-
-@register_keras_serializable(package="Custom", name="take_cls_token_fn")
-def take_cls_token_fn(x):
-    return x[:, 0, :]
-
-@register_keras_serializable(package="Custom", name="extract_patches")
-def extract_patches(x, patch_size, stride):
-    return tf.signal.frame(
-        x,
-        frame_length=patch_size,
-        frame_step=stride,
-        axis=1
-    )
-
-@register_keras_serializable(package="Custom", name="make_positions")
-def make_positions(x, num_patches):
-    batch = tf.shape(x)[0]
-    idx = tf.range(num_patches, dtype=tf.int32)[tf.newaxis, :]
-    return tf.broadcast_to(idx, [batch, num_patches])
-
-@register_keras_serializable(package="Custom", name="add_sinusoidal_pos")
-def add_sinusoidal_pos(x, num_patches, embed_dim):
-    pos = tf.cast(tf.range(num_patches)[:, None], tf.float32)
-    i = tf.cast(tf.range(embed_dim)[None, :], tf.float32)
-    angle_rates = 1.0 / tf.pow(10000.0, (2.0 * tf.floor(i/2.0)) / tf.cast(embed_dim, tf.float32))
-    angle_rads = pos * angle_rates
-    sin = tf.sin(angle_rads)
-    cos = tf.cos(angle_rads)
-    even_mask = tf.cast(tf.equal(tf.math.floormod(tf.range(embed_dim), 2), 0), tf.float32)[None, :]
-    pos_encoding = sin * even_mask + cos * (1.0 - even_mask)
-    pos_encoding = pos_encoding[tf.newaxis, ...]
-    return tf.broadcast_to(pos_encoding, [tf.shape(x)[0], num_patches, embed_dim])
-
-@register_keras_serializable(package="Custom", name="add_channel")
-def add_channel(inputs):
-    return tf.expand_dims(inputs, -1)
-
-@register_keras_serializable(package="Custom", name="zscore")
-def zscore(x):
-    m = tf.reduce_mean(x, axis=-1, keepdims=True)
-    s = tf.math.reduce_std(x, axis=-1, keepdims=True)
-    return (x - m) / s
