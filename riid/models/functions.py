@@ -4,7 +4,6 @@ from tensorflow.keras.utils import register_keras_serializable
 
 @register_keras_serializable(package="Custom", name="zscore")
 def zscore(x):
-    """Z-score normalization function."""
     m = tf.reduce_mean(x, axis=-1, keepdims=True)
     s = tf.math.reduce_std(x, axis=-1, keepdims=True)
     return (x - m) / s
@@ -12,13 +11,11 @@ def zscore(x):
 
 @register_keras_serializable(package="Custom", name="add_channel")
 def add_channel(inputs):
-    """Add a channel dimension to inputs."""
     return tf.expand_dims(inputs, -1)
 
 
 @register_keras_serializable(package="Custom", name="extract_patches")
 def extract_patches(x, patch_size, stride):
-    """Extract patches from input tensor."""
     return tf.signal.frame(
         x,
         frame_length=patch_size,
@@ -29,7 +26,6 @@ def extract_patches(x, patch_size, stride):
 
 @register_keras_serializable(package="Custom", name="add_sinusoidal_pos")
 def add_sinusoidal_pos(x, num_patches, embed_dim):
-    """Add sinusoidal positional encoding."""
     pos = tf.cast(tf.range(num_patches)[:, None], tf.float32)
     i = tf.cast(tf.range(embed_dim)[None, :], tf.float32)
     angle_rates = 1.0 / tf.pow(10000.0, (2.0 * tf.floor(i/2.0)) / tf.cast(embed_dim, tf.float32))
@@ -44,11 +40,11 @@ def add_sinusoidal_pos(x, num_patches, embed_dim):
 
 @register_keras_serializable(package="Custom", name="make_positions")
 def make_positions(x, num_patches):
-    """Create position indices."""
-    return tf.range(num_patches, dtype=tf.float32)[tf.newaxis, :, tf.newaxis]
+    batch = tf.shape(x)[0]
+    idx = tf.range(num_patches, dtype=tf.int32)[tf.newaxis, :]
+    return tf.broadcast_to(idx, [batch, num_patches])
 
 
 @register_keras_serializable(package="Custom", name="take_cls_token_fn")
 def take_cls_token_fn(x):
-    """Extract the CLS token from the sequence."""
     return x[:, 0, :]

@@ -3,7 +3,6 @@ from time import perf_counter as timer
 
 
 class TimeLimitCallback(Callback):
-    """Callback to stop training after a specified time limit."""
     def __init__(self, max_seconds):
         super().__init__()
         self.max_seconds = max_seconds

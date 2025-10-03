@@ -93,31 +93,29 @@ class L1NormLayer(Layer):
 
 @register_keras_serializable(package="Custom", name="ClassToken")
 class ClassToken(Layer):
-    """Learnable class token layer."""
-    def __init__(self, **kwargs):
-        super(ClassToken, self).__init__(**kwargs)
+    def __init__(self, embed_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.embed_dim = embed_dim
 
     def build(self, input_shape):
+        # input_shape = (batch, num_patches, embed_dim)
         self.cls_token = self.add_weight(
-            name="cls_token",
-            shape=(1, 1, input_shape[-1]),
-            initializer="random_normal",
-            trainable=True
+            shape=(1, 1, self.embed_dim),
+            initializer="zeros",
+            trainable=True,
+            name="cls_token"
         )
-        super(ClassToken, self).build(input_shape)
+        super().build(input_shape)
 
-    def call(self, inputs):
-        batch_size = tf.shape(inputs)[0]
+    def call(self, x):
+        # x.shape = (batch, num_patches, embed_dim)
+        batch_size = tf.shape(x)[0]
         cls_tokens = tf.tile(self.cls_token, [batch_size, 1, 1])
-        return tf.concat([cls_tokens, inputs], axis=1)
-
-    def get_config(self):
-        return super(ClassToken, self).get_config()
+        return tf.concat([cls_tokens, x], axis=1)
 
 
 @register_keras_serializable(package="Custom", name="GradientReversalLayer")
 class GradientReversalLayer(Layer):
-    """Gradient reversal layer for domain adversarial training."""
     def __init__(self, **kwargs):
         super(GradientReversalLayer, self).__init__(**kwargs)
         self.lmbda = tf.Variable(0.0, trainable=False, dtype=tf.float32)
@@ -129,6 +127,3 @@ class GradientReversalLayer(Layer):
                 return -self.lmbda * dy
             return x, grad
         return _reverse_gradient(inputs)
-
-    def get_config(self):
-        return super(GradientReversalLayer, self).get_config()
