@@ -1,8 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Input, Dropout, Activation
-from tensorflow.keras.initializers import RandomNormal
+from tensorflow.keras.layers import Dense, Input, Dropout, SpatialDropout1D, Activation
 from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
@@ -25,7 +24,7 @@ class ADDA(PyRIIDModel):
             t_optimizer: tensorflow optimizer or optimizer name to use for training target encoder
             source_model: pretrained source model
             discriminator_hidden_layers: size of the dense layer(s) in the discriminator
-            dropout: optional droupout layer after each hidden layer
+            dropout: optional dropout layer after each hidden layer
             metrics: list of metric functions
         """
         super().__init__()
@@ -45,7 +44,7 @@ class ADDA(PyRIIDModel):
             self.classification_loss = source_model.loss
 
             def strip_dropout(layer):
-                if isinstance(layer, Dropout):
+                if isinstance(layer, (Dropout, SpatialDropout1D)):
                     return Activation('linear', name=layer.name)
                 return layer.__class__.from_config(layer.get_config())
             
@@ -74,6 +73,8 @@ class ADDA(PyRIIDModel):
             def modify_dropout(layer):
                 if isinstance(layer, Dropout):
                     return Dropout(self.dropout, name=layer.name)
+                elif isinstance(layer, SpatialDropout1D):
+                    return SpatialDropout1D(self.dropout, name=layer.name)
                 return layer.__class__.from_config(layer.get_config())
             
             target_source_model = clone_model(
@@ -170,7 +171,7 @@ class ADDA(PyRIIDModel):
             tf.data.Dataset
               .from_tensor_slices((X_target, domain_target))
               .repeat()
-              .shuffle(len(X_source))
+              .shuffle(len(X_target))
               .batch(half_batch_size)
         )
         
@@ -280,11 +281,11 @@ class ADDA(PyRIIDModel):
                 f_s_val = self.source_encoder(x_s_val, training=False)
                 f_t_val = self.target_encoder(x_t_val, training=False)
 
-                pred_s_val = self.discriminator(f_s_val, training=True)
-                pred_t_val = self.discriminator(f_t_val, training=True)
+                pred_s_val = self.discriminator(f_s_val, training=False)
+                pred_t_val = self.discriminator(f_t_val, training=False)
 
-                domain_src_val = np.zeros(len(x_s_val)).reshape(-1, 1)
-                domain_tgt_val = np.ones(len(x_t_val)).reshape(-1, 1)
+                domain_src_val = tf.zeros((tf.shape(x_s_val)[0], 1), dtype=tf.float32)
+                domain_tgt_val = tf.ones((tf.shape(x_t_val)[0], 1), dtype=tf.float32)
                 
                 loss_s_val = self.discriminator_loss(domain_src_val, pred_s_val)
                 loss_t_val = self.discriminator_loss(domain_tgt_val, pred_t_val)
@@ -346,22 +347,18 @@ class ADDA(PyRIIDModel):
             self.model.set_weights(best_weights)
 
         return self.history
-    def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
-        """Classify the spectra in the provided `SampleSet`(s).
 
-        Results are stored inside the first SampleSet's prediction-related properties.
+    def predict(self, ss: SampleSet, batch_size: int = 1000):
+        """Classify the spectra in the provided `SampleSet`.
+
+        Results are stored inside the SampleSet's prediction-related properties.
 
         Args:
             ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
                 foreground (AKA, "net") or gross
-            bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
             batch_size: batch size during call to self.model.predict
         """
-        x_test = ss.get_samples().astype(float)
-        if bg_ss:
-            X = [x_test, bg_ss.get_samples().astype(float)]
-        else:
-            X = x_test
+        X = ss.get_samples().astype("float32")
 
         results = self.model.predict(X, batch_size=batch_size)
 

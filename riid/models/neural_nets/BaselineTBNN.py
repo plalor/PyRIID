@@ -10,7 +10,7 @@ from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.models.functions import zscore, extract_patches, add_sinusoidal_pos
+from riid.models.functions import zscore, sqrt_zscore, extract_patches, add_sinusoidal_pos
 from riid.models.callbacks import TimeLimitCallback
 
 
@@ -18,7 +18,7 @@ class BaselineTBNN(PyRIIDModel):
     """Transformer-based neural network classifier from Li et al. 2024."""
     def __init__(self, activation="relu", loss=None, optimizer=None, metrics=None,
                  final_activation="softmax", num_heads=None, ff_dim=None, num_layers=None,
-                 dropout=0):
+                 dropout=0, normalize="zscore"):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -30,7 +30,8 @@ class BaselineTBNN(PyRIIDModel):
             num_heads: number of attention heads
             ff_dim: dimension of feed-forward network
             num_layers: number of transformer blocks
-            dropout: optional droupout layer after each hidden layer
+            dropout: optional dropout layer after each hidden layer
+            normalize: whether (and how) to normalize input spectra
         """
         super().__init__()
 
@@ -46,12 +47,13 @@ class BaselineTBNN(PyRIIDModel):
         self.patch_size = 32
         self.embed_dim = self.patch_size
         self.dropout = dropout
+        self.normalize = normalize
 
         self.model = None
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=None,
             callbacks=None, patience=10**9, es_monitor="val_loss", es_mode="min", es_verbose=0,
-            target_level="Isotope", verbose=False, training_time=None, normalize=True):
+            target_level="Isotope", verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -69,7 +71,6 @@ class BaselineTBNN(PyRIIDModel):
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
             training_time: whether to terminate early if run exceeds prealloted time
-            normalize: whether to apply z-score normalization to input spectra
 
         Returns:
             `history` dictionary
@@ -105,9 +106,13 @@ class BaselineTBNN(PyRIIDModel):
 
         if not self.model:
             input_shape = X_train.shape[1]
-
             inputs = Input(shape=(input_shape,), name="Spectrum")
-            x = Lambda(zscore, name="zscore")(inputs) if normalize else inputs
+            if self.normalize == "zscore":
+                x = Lambda(zscore, name="zscore")(inputs)
+            elif self.normalize == "sqrt_zscore":
+                x = Lambda(sqrt_zscore, name="sqrt_zscore")(inputs)
+            else:
+                x = inputs
 
             x = Lambda(
                 extract_patches,
@@ -192,22 +197,17 @@ class BaselineTBNN(PyRIIDModel):
 
         return self.history
 
-    def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
-        """Classify the spectra in the provided `SampleSet`(s).
+    def predict(self, ss: SampleSet, batch_size: int = 1000):
+        """Classify the spectra in the provided `SampleSet`.
 
-        Results are stored inside the first SampleSet's prediction-related properties.
+        Results are stored inside the SampleSet's prediction-related properties.
 
         Args:
             ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
                 foreground (AKA, "net") or gross
-            bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
             batch_size: batch size during call to self.model.predict
         """
-        x_test = ss.get_samples().astype(float)
-        if bg_ss:
-            X = [x_test, bg_ss.get_samples().astype(float)]
-        else:
-            X = x_test
+        X = ss.get_samples().astype("float32")
 
         results = self.model.predict(X, batch_size=batch_size)
 

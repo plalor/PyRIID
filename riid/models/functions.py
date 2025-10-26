@@ -3,10 +3,19 @@ from tensorflow.keras.utils import register_keras_serializable
 
 
 @register_keras_serializable(package="Custom", name="zscore")
-def zscore(x):
+def zscore(x, eps=1e-12):
     m = tf.reduce_mean(x, axis=-1, keepdims=True)
     s = tf.math.reduce_std(x, axis=-1, keepdims=True)
-    return (x - m) / s
+    return (x - m) / (s + eps)
+
+
+@register_keras_serializable(package="Custom", name="sqrt_zscore")
+def sqrt_zscore(x, eps=1e-12):
+    y = tf.sqrt(tf.maximum(x, 0.0))
+    m = tf.reduce_mean(y, axis=-1, keepdims=True)
+    s = tf.math.reduce_std(y, axis=-1, keepdims=True)
+    z = (y - m) / (s + eps)
+    return z
 
 
 @register_keras_serializable(package="Custom", name="add_channel")

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dropout
+from tensorflow.keras.layers import Input, Dropout, SpatialDropout1D
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
@@ -38,6 +38,8 @@ class DeepCORAL(PyRIIDModel):
             def modify_dropout(layer):
                 if isinstance(layer, Dropout):
                     return Dropout(dropout, name=layer.name)
+                elif isinstance(layer, SpatialDropout1D):
+                    return SpatialDropout1D(dropout, name=layer.name)
                 return layer.__class__.from_config(layer.get_config())
             
             self.source_model = clone_model(
@@ -306,22 +308,17 @@ class DeepCORAL(PyRIIDModel):
 
         return self.history
 
-    def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
-        """Classify the spectra in the provided `SampleSet`(s).
+    def predict(self, ss: SampleSet, batch_size: int = 1000):
+        """Classify the spectra in the provided `SampleSet`.
 
-        Results are stored inside the first SampleSet's prediction-related properties.
+        Results are stored inside the SampleSet's prediction-related properties.
 
         Args:
             ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
                 foreground (AKA, "net") or gross
-            bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
             batch_size: batch size during call to self.model.predict
         """
-        x_test = ss.get_samples().astype(float)
-        if bg_ss:
-            X = [x_test, bg_ss.get_samples().astype(float)]
-        else:
-            X = x_test
+        X = ss.get_samples().astype("float32")
 
         results = self.model.predict(X, batch_size=batch_size)
 

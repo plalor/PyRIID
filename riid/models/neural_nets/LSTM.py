@@ -2,44 +2,40 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.layers import Dense, Input, LSTM, Bidirectional, Lambda
+from tensorflow.keras.layers import Dense, Input, LSTM, Bidirectional, Lambda, Dropout, LayerNormalization
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l2
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.models.functions import extract_patches
+from riid.models.functions import zscore, sqrt_zscore, extract_patches
 from riid.models.callbacks import TimeLimitCallback
 
 
 class LSTMClassifier(PyRIIDModel):
     """LSTM classifier."""
-    def __init__(self, loss=None, optimizer=None, metrics=None, l2_alpha=None,
-                 activity_regularizer=None, final_activation="softmax", hidden_layers=None,
-                 patch_size=None, stride=None, bidirectional=False, dropout=0):
+    def __init__(self, loss=None, optimizer=None, metrics=None, final_activation="softmax",
+                 hidden_layers=None, patch_size=None, stride=None, bidirectional=False, dropout=0,
+                 normalize="zscore"):
         """
         Args:
             loss: loss function to use for training
             optimizer: tensorflow optimizer or optimizer name to use for training
             metrics: list of metrics to be evaluating during training
-            l2_alpha: alpha value for the L2 regularization of each dense layer
-            activity_regularizer: regularizer function applied each dense layer output
             final_activation: final activation function to apply to model output
             hidden_layers: hidden layer structure of the MLP
             patch_size: size of patches to reshape the input spectrum
             stride: step size between each patch
-            bidirectional: whether to use a birdirectional LSTM
-            dropout: optional droupout layer after each hidden layer
+            bidirectional: whether to use a bidirectional LSTM
+            dropout: optional dropout layer after each hidden layer
+            normalize: whether (and how) to normalize input spectra
         """
         super().__init__()
 
         self.loss = loss or CategoricalCrossentropy()
         self.optimizer = optimizer or Adam(learning_rate=0.001)
         self.metrics = metrics
-        self.kernel_regularizer = l2(l2_alpha) if l2_alpha else None
-        self.activity_regularizer = activity_regularizer
         self.final_activation = final_activation
 
         self.hidden_layers = hidden_layers
@@ -47,6 +43,7 @@ class LSTMClassifier(PyRIIDModel):
         self.stride = stride or self.patch_size
         self.bidirectional = bidirectional
         self.dropout = dropout
+        self.normalize = normalize
 
         self.model = None
 
@@ -106,12 +103,18 @@ class LSTMClassifier(PyRIIDModel):
         if not self.model:
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
+            if self.normalize == "zscore":
+                x = Lambda(zscore, name="zscore")(inputs)
+            elif self.normalize == "sqrt_zscore":
+                x = Lambda(sqrt_zscore, name="sqrt_zscore")(inputs)
+            else:
+                x = inputs
 
             x = Lambda(
                 extract_patches,
                 arguments={"patch_size": self.patch_size, "stride": self.stride},
                 name="patch_projection"
-            )(inputs)
+            )(x)
 
             for layer, units in enumerate(self.hidden_layers):
                 return_sequences = layer < len(self.hidden_layers) - 1
@@ -120,10 +123,6 @@ class LSTMClassifier(PyRIIDModel):
                         LSTM(units // 2,
                              activation='tanh',
                              recurrent_activation='sigmoid',
-                             kernel_regularizer=self.kernel_regularizer,
-                             activity_regularizer=self.activity_regularizer,
-                             dropout=self.dropout,
-                             recurrent_dropout=self.dropout,
                              return_sequences=return_sequences,
                              name=f"lstm_{layer}",
                         ),
@@ -133,14 +132,12 @@ class LSTMClassifier(PyRIIDModel):
                     lstm_layer = LSTM(units,
                              activation='tanh',
                              recurrent_activation='sigmoid',
-                             kernel_regularizer=self.kernel_regularizer,
-                             activity_regularizer=self.activity_regularizer,
-                             dropout=self.dropout,
-                             recurrent_dropout=self.dropout,
                              return_sequences=return_sequences,
                              name=f"lstm_{layer}",
-                            )
+                    )
                 x = lstm_layer(x)
+                x = LayerNormalization(epsilon=1e-6, name=f"ln_{layer}")(x)
+                x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
             outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
             self.model = Model(inputs, outputs)
             self.model.compile(loss=self.loss, optimizer=self.optimizer,
@@ -185,22 +182,17 @@ class LSTMClassifier(PyRIIDModel):
 
         return self.history
 
-    def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
-        """Classify the spectra in the provided `SampleSet`(s).
+    def predict(self, ss: SampleSet, batch_size: int = 1000):
+        """Classify the spectra in the provided `SampleSet`.
 
-        Results are stored inside the first SampleSet's prediction-related properties.
+        Results are stored inside the SampleSet's prediction-related properties.
 
         Args:
             ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
                 foreground (AKA, "net") or gross
-            bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
             batch_size: batch size during call to self.model.predict
         """
-        x_test = ss.get_samples().astype(float)
-        if bg_ss:
-            X = [x_test, bg_ss.get_samples().astype(float)]
-        else:
-            X = x_test
+        X = ss.get_samples().astype("float32")
 
         results = self.model.predict(X, batch_size=batch_size)
 

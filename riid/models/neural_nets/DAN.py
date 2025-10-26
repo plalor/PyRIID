@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dropout
+from tensorflow.keras.layers import Input, Dropout, SpatialDropout1D
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
@@ -46,6 +46,8 @@ class DAN(PyRIIDModel):
             def modify_dropout(layer):
                 if isinstance(layer, Dropout):
                     return Dropout(self.dropout, name=layer.name)
+                elif isinstance(layer, SpatialDropout1D):
+                    return SpatialDropout1D(self.dropout, name=layer.name)
                 return layer.__class__.from_config(layer.get_config())
             
             self.source_model = clone_model(
@@ -134,10 +136,8 @@ class DAN(PyRIIDModel):
         Y_tgt_val = target_val_ss.sources.T.groupby(target_level, sort=False).sum().T.values.astype("float32")
 
         center = self.kernel_num // 2
-        self.sigma_list = [
-            self.base_sigma * (self.kernel_mul ** (i - center))
-            for i in range(self.kernel_num)
-        ]
+        self.sigma_list = [self.base_sigma * (self.kernel_mul ** (i - center)) for i in range(self.kernel_num)]
+        self.sigma_list = [tf.constant(s, dtype=tf.float32) for s in self.sigma_list]
 
         # Create datasets
         half_batch_size = batch_size // 2
@@ -321,22 +321,17 @@ class DAN(PyRIIDModel):
 
         return self.history
 
-    def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
+    def predict(self, ss: SampleSet, batch_size: int = 1000):
         """Classify the spectra in the provided SampleSet.
 
-        Results are stored in the first SampleSet's prediction-related properties.
-        
+        Results are stored inside the SampleSet's prediction-related properties.
+
         Args:
             ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
                 foreground (AKA, "net") or gross
-            bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
             batch_size: batch size during call to self.model.predict
         """
-        x_test = ss.get_samples().astype(float)
-        if bg_ss:
-            X = [x_test, bg_ss.get_samples().astype(float)]
-        else:
-            X = x_test
+        X = ss.get_samples().astype("float32")
 
         results = self.model.predict(X, batch_size=batch_size)
 
@@ -367,21 +362,19 @@ class DAN(PyRIIDModel):
         y_norm = tf.reduce_sum(tf.square(y), axis=1, keepdims=True)
         dist = x_norm - 2 * tf.matmul(x, y, transpose_b=True) + tf.transpose(y_norm)
         return tf.exp(-dist / (2.0 * sigma**2))
-
+    
     def mmd_loss(self, source_features, target_features):
-        """
-        Multi-kernel MMD: average over RBFs with bandwidths in self.sigma_list
-        """
+        """Multi-kernel MMD: average over RBFs with bandwidths in self.sigma_list"""
+        def mean_no_diag(K):
+            n = tf.shape(K)[0]
+            mask = tf.ones_like(K) - tf.eye(n, dtype=K.dtype)
+            return tf.reduce_sum(K * mask) / tf.cast(n * (n - 1), K.dtype)
         mmd_total = 0.0
         for sigma in self.sigma_list:
-            K_ss = DAN.gaussian_kernel(source_features, source_features, sigma)
-            K_tt = DAN.gaussian_kernel(target_features, target_features, sigma)
-            K_st = DAN.gaussian_kernel(source_features, target_features, sigma)
-            mmd_total += (
-                tf.reduce_mean(K_ss)
-              + tf.reduce_mean(K_tt)
-              - 2.0 * tf.reduce_mean(K_st)
-            )
+            K_ss = self.gaussian_kernel(source_features, source_features, sigma)
+            K_tt = self.gaussian_kernel(target_features, target_features, sigma)
+            K_st = self.gaussian_kernel(source_features, target_features, sigma)
+            mmd_total += mean_no_diag(K_ss) + mean_no_diag(K_tt) - 2.0 * tf.reduce_mean(K_st)
         return mmd_total / len(self.sigma_list)
 
     @tf.function

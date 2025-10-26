@@ -2,34 +2,32 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.layers import Dense, Input, Dropout, Lambda
+from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, LayerNormalization, Activation
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l2
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.models.functions import zscore
+from riid.models.functions import zscore, sqrt_zscore
 from riid.models.callbacks import TimeLimitCallback
 
 
 class MLP(PyRIIDModel):
     """Multi-layer perceptron classifier."""
     def __init__(self, activation="relu", loss=None, optimizer=None,
-                 metrics=None, l2_alpha=None, activity_regularizer=None,
-                 final_activation="softmax", hidden_layers=None, dropout=0):
+                 metrics=None, final_activation="softmax", hidden_layers=None,
+                 dropout=0, normalize="zscore"):
         """
         Args:
             activation: activation function to use for each dense layer
             loss: loss function to use for training
             optimizer: tensorflow optimizer or optimizer name to use for training
             metrics: list of metrics to be evaluating during training
-            l2_alpha: alpha value for the L2 regularization of each dense layer
-            activity_regularizer: regularizer function applied each dense layer output
             final_activation: final activation function to apply to model output
             hidden_layers: hidden layer structure of the MLP
-            dropout: optional droupout layer after each hidden layer
+            dropout: optional dropout layer after each hidden layer
+            normalize: whether (and how) to normalize input spectra
         """
         super().__init__()
 
@@ -37,18 +35,17 @@ class MLP(PyRIIDModel):
         self.loss = loss or CategoricalCrossentropy()
         self.optimizer = optimizer or Adam(learning_rate=0.001)
         self.metrics = metrics
-        self.kernel_regularizer = l2(l2_alpha) if l2_alpha else None
-        self.activity_regularizer = activity_regularizer
         self.final_activation = final_activation
 
         self.hidden_layers = hidden_layers
         self.dropout = dropout
+        self.normalize = normalize
 
         self.model = None
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=None,
             callbacks=None, patience=10**9, es_monitor="val_loss", es_mode="min", es_verbose=0,
-            target_level="Isotope", verbose=False, training_time=None, normalize=True):
+            target_level="Isotope", verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -66,7 +63,6 @@ class MLP(PyRIIDModel):
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
             training_time: whether to terminate early if run exceeds prealloted time
-            normalize: whether to apply z-score normalization to input spectra
 
         Returns:
             `history` dictionary
@@ -103,16 +99,17 @@ class MLP(PyRIIDModel):
         if not self.model:
             input_shape = X_train.shape[1]
             inputs = Input(shape=(input_shape,), name="Spectrum")
-            x = Lambda(zscore, name="zscore")(inputs) if normalize else inputs
+            if self.normalize == "zscore":
+                x = Lambda(zscore, name="zscore")(inputs)
+            elif self.normalize == "sqrt_zscore":
+                x = Lambda(sqrt_zscore, name="sqrt_zscore")(inputs)
+            else:
+                x = inputs
+
             for layer, nodes in enumerate(self.hidden_layers):
-                x = Dense(
-                    nodes,
-                    activation=self.activation,
-                    activity_regularizer=self.activity_regularizer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name=f"dense_{layer}"
-                )(x)
-                
+                x = Dense(nodes, activation=None, use_bias=False, name=f"dense_{layer}")(x)
+                x = LayerNormalization(epsilon=1e-6, name=f"ln_{layer}")(x)
+                x = Activation(self.activation, name=f"act_{layer}")(x)
                 x = Dropout(self.dropout, name=f"dropout_{layer}")(x)
 
             outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
@@ -159,22 +156,17 @@ class MLP(PyRIIDModel):
 
         return self.history
 
-    def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
-        """Classify the spectra in the provided `SampleSet`(s).
+    def predict(self, ss: SampleSet, batch_size: int = 1000):
+        """Classify the spectra in the provided `SampleSet`.
 
-        Results are stored inside the first SampleSet's prediction-related properties.
+        Results are stored inside the SampleSet's prediction-related properties.
 
         Args:
             ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
                 foreground (AKA, "net") or gross
-            bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
             batch_size: batch size during call to self.model.predict
         """
-        x_test = ss.get_samples().astype(float)
-        if bg_ss:
-            X = [x_test, bg_ss.get_samples().astype(float)]
-        else:
-            X = x_test
+        X = ss.get_samples().astype("float32")
 
         results = self.model.predict(X, batch_size=batch_size)
 

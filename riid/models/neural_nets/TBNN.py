@@ -3,14 +3,14 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, MultiHeadAttention, \
-    LayerNormalization, Conv1D, SpatialDropout1D, TimeDistributed, MaxPooling1D, Flatten
+    LayerNormalization, Conv1D, TimeDistributed, MaxPooling1D, Flatten, Activation, Softmax, GlobalAveragePooling1D
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.models.functions import zscore, add_channel, extract_patches, add_sinusoidal_pos, make_positions, take_cls_token_fn
+from riid.models.functions import zscore, sqrt_zscore, add_channel, extract_patches, add_sinusoidal_pos, make_positions, take_cls_token_fn
 from riid.models.layers import ClassToken
 from riid.models.callbacks import TimeLimitCallback
 
@@ -18,9 +18,10 @@ from riid.models.callbacks import TimeLimitCallback
 class TBNN(PyRIIDModel):
     """Transformer-based neural network classifier."""
     def __init__(self, activation="relu", loss=None, optimizer=None, metrics=None,
-                 final_activation="softmax", embed_mode="linear", embed_filters=None,
+                 final_activation="softmax", embed_mode="linear", embed_inner=None,
                  embed_dim=None, pos_encoding="learnable", num_heads=None, ff_dim=None,
-                 num_layers=None, patch_size=None, stride=None, dropout=0):
+                 num_layers=None, patch_size=None, stride=None, readout="cls", dropout=0,
+                 normalize="zscore"):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -29,7 +30,7 @@ class TBNN(PyRIIDModel):
             metrics: list of metrics to be evaluating during training
             final_activation: final activation function to apply to model output
             embed_mode: mode for performing the embedding
-            embed_filters: number of filters for intermediate layers in CNN and MLP embeddings
+            embed_inner: internal size of the patch embedder (filters for CNN or hidden units for MLP)
             embed_dim: size of the embedding vector
             pos_encoding: whether to use `learnable` or `sinusoidal` positional encodings
             num_heads: number of attention heads
@@ -37,7 +38,9 @@ class TBNN(PyRIIDModel):
             num_layers: number of transformer blocks
             patch_size: size of patches to reshape the input spectrum
             stride: step size between each patch
-            dropout: optional droupout layer after each hidden layer
+            readout: strategy for aggregating token embeddings into a vector for classification
+            dropout: optional dropout layer after each hidden layer
+            normalize: whether (and how) to normalize input spectra
         """
         super().__init__()
 
@@ -48,7 +51,7 @@ class TBNN(PyRIIDModel):
         self.final_activation = final_activation
 
         self.embed_mode = embed_mode.lower()
-        self.embed_filters = embed_filters
+        self.embed_inner = embed_inner
         self.embed_dim = embed_dim or patch_size
         self.pos_encoding = pos_encoding.lower()
         self.num_heads = num_heads
@@ -56,13 +59,15 @@ class TBNN(PyRIIDModel):
         self.num_layers = num_layers
         self.patch_size = patch_size
         self.stride = stride or patch_size
+        self.readout = readout
         self.dropout = dropout
+        self.normalize = normalize
 
         self.model = None
 
     def fit(self, training_ss: SampleSet, validation_ss: SampleSet, batch_size=64, epochs=None,
             callbacks=None, patience=10**9, es_monitor="val_loss", es_mode="min", es_verbose=0,
-            target_level="Isotope", verbose=False, training_time=None, normalize=True):
+            target_level="Isotope", verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -80,7 +85,6 @@ class TBNN(PyRIIDModel):
             target_level: `SampleSet.sources` column level to use
             verbose: whether to show detailed model training output
             training_time: whether to terminate early if run exceeds prealloted time
-            normalize: whether to apply z-score normalization to input spectra
 
         Returns:
             `history` dictionary
@@ -118,7 +122,12 @@ class TBNN(PyRIIDModel):
             input_shape = X_train.shape[1]
             
             inputs = Input(shape=(input_shape,), name="Spectrum")
-            x = Lambda(zscore, name="zscore")(inputs) if normalize else inputs
+            if self.normalize == "zscore":
+                x = Lambda(zscore, name="zscore")(inputs)
+            elif self.normalize == "sqrt_zscore":
+                x = Lambda(sqrt_zscore, name="sqrt_zscore")(inputs)
+            else:
+                x = inputs
 
             if self.embed_mode == "raw":
                 assert self.embed_dim == self.patch_size
@@ -135,92 +144,70 @@ class TBNN(PyRIIDModel):
                     kernel_size=self.patch_size,
                     strides=self.stride,
                     padding="valid",
+                    activation=None,
                     use_bias=True,
                     name="patch_projection"
                 )(x)
-                x = SpatialDropout1D(self.dropout, name="drop_patch_projection")(x)
+                x = Dropout(self.dropout, name="drop_patch_projection")(x)
 
-            elif self.embed_mode == "mlp_single":
+            elif self.embed_mode == "mlp":
+                self.embed_inner = self.embed_inner or 2 * self.embed_dim
                 x = Lambda(add_channel, name="add_channel")(x)
                 x = Conv1D(
                     filters=self.embed_dim,
                     kernel_size=self.patch_size,
                     strides=self.stride,
                     padding="valid",
-                    use_bias=True,
-                    activation=self.activation,
+                    activation=None,
+                    use_bias=False,
                     name="patch_projection"
                 )(x)
-                x = SpatialDropout1D(self.dropout, name="drop_patch_projection")(x)
-
-            elif self.embed_mode == "mlp_double":
-                self.embed_filters = self.embed_filters or self.embed_dim
-                x = Lambda(add_channel, name="add_channel")(x)
-                x = Conv1D(
-                  filters=self.embed_filters,
-                  kernel_size=self.patch_size,
-                  strides=self.stride,
-                  padding="valid",
-                  activation=self.activation,
-                  name="patch_projection1"
+                x = LayerNormalization(epsilon=1e-6, name="ln_patch_projection")(x)
+                x = Dense(
+                    units=self.embed_inner,
+                    activation=self.activation,
+                    use_bias=True,
+                    name="mlp_dense1"
+                    )(x)
+                x = Dense(
+                    units=self.embed_dim,
+                    activation=None,
+                    use_bias=True,
+                    name="mlp_dense2"
                 )(x)
-                x = SpatialDropout1D(self.dropout, name="drop_patch_projection1")(x)
-                x = Conv1D(
-                  filters=self.embed_dim,
-                  kernel_size=1,
-                  activation=self.activation,
-                  name="patch_projection2"
-                )(x)
-                x = SpatialDropout1D(self.dropout, name="drop_patch_projection2")(x)
+                x = Dropout(self.dropout, name="drop_mlp_projection")(x)
 
-            elif self.embed_mode == "cnn_single":
-                self.embed_filters = self.embed_filters or 16
+            elif self.embed_mode == "cnn":
+                self.embed_inner = self.embed_inner or 16
                 patches = Lambda(
                     extract_patches,
                     arguments={"patch_size": self.patch_size, "stride": self.stride},
                     name="patch_extraction"
                 )(x)
-                patches = Lambda(add_channel, name="add_channel")(patches)
+                patches = Lambda(add_channel, name="add_channel")(patches)                
                 def make_patch_cnn_single():
                     return Sequential([
-                        Conv1D(self.embed_filters, kernel_size=3, padding="same", activation=self.activation),
-                        SpatialDropout1D(self.dropout),
+                        Conv1D(self.embed_inner, kernel_size=5, padding="same",
+                               activation=None, use_bias=False),
+                        LayerNormalization(epsilon=1e-6),
+                        Activation(self.activation),
                         MaxPooling1D(pool_size=2),
                         Flatten(),
-                        Dense(self.embed_dim, activation=self.activation),
+                        Dense(self.embed_dim, activation=None),
                         Dropout(self.dropout),
                     ])
                 x = TimeDistributed(make_patch_cnn_single(), name="patch_cnn_single")(patches)
-
-            elif self.embed_mode == "cnn_double":
-                self.embed_filters = self.embed_filters or 16
-                patches = Lambda(
-                    extract_patches,
-                    arguments={"patch_size": self.patch_size, "stride": self.stride},
-                    name="patch_extraction"
-                )(x)
-                patches = Lambda(add_channel, name="add_channel")(patches)
-                def make_patch_cnn_double():
-                    return Sequential([
-                        Conv1D(self.embed_filters, kernel_size=3, padding="same", activation=self.activation),
-                        SpatialDropout1D(self.dropout),
-                        MaxPooling1D(pool_size=2),
-                        Conv1D(2 * self.embed_filters, kernel_size=3, padding="same", activation=self.activation),
-                        SpatialDropout1D(self.dropout),
-                        MaxPooling1D(pool_size=2),
-                        Flatten(),
-                        Dense(self.embed_dim, activation=self.activation),
-                        Dropout(self.dropout),
-                    ])
-                x = TimeDistributed(make_patch_cnn_double(), name="patch_cnn_double")(patches)
 
             else:
                 raise ValueError("`embed_mode` not understood.")
             
             num_patches = (input_shape - self.patch_size) // self.stride + 1
 
-            x = ClassToken(self.embed_dim, name="class_token")(x)
-            num_tokens = num_patches + 1
+            if self.readout == "cls":
+                x = ClassToken(self.embed_dim, name="class_token")(x)
+                num_tokens = num_patches + 1
+            else:
+                num_tokens = num_patches
 
             if self.pos_encoding == "learnable":
                 pos_indices = Lambda(
@@ -267,7 +254,20 @@ class TBNN(PyRIIDModel):
                 x = Add(name=f"resid_ffn_{layer}")([x, y])
 
             x = LayerNormalization(epsilon=1e-6, name="encoder_norm")(x)
-            x = Lambda(take_cls_token_fn, name="take_cls_token")(x)
+
+            if self.readout == "cls":
+                x = Lambda(take_cls_token_fn, name="take_cls_token")(x)
+            elif self.readout == "gap":
+                x = GlobalAveragePooling1D(name="token_gap")(x)
+            elif self.readout == "attn":
+                a = Dense(1, name="attn_logits")(x)
+                a = Softmax(axis=1, name="attn_weights")(a)
+                x = Lambda(lambda t: tf.reduce_sum(t[0]*t[1], axis=1), name="attn_pool")([a, x])
+            elif self.readout == "flatten":
+                x = Flatten(name="token_flatten")(x)
+            else:
+                raise ValueError("`readout` must be 'cls','gap','attn','flatten'")
+
             x = Dropout(self.dropout, name="dropout_out")(x)
 
             outputs = Dense(Y_train.shape[1], activation=self.final_activation, name="output")(x)
@@ -314,22 +314,17 @@ class TBNN(PyRIIDModel):
 
         return self.history
 
-    def predict(self, ss: SampleSet, bg_ss: SampleSet = None, batch_size: int = 1000):
-        """Classify the spectra in the provided `SampleSet`(s).
+    def predict(self, ss: SampleSet, batch_size: int = 1000):
+        """Classify the spectra in the provided `SampleSet`.
 
-        Results are stored inside the first SampleSet's prediction-related properties.
+        Results are stored inside the SampleSet's prediction-related properties.
 
         Args:
             ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are either
                 foreground (AKA, "net") or gross
-            bg_ss: `SampleSet` of `n` spectra where `n` >= 1 and the spectra are background
             batch_size: batch size during call to self.model.predict
         """
-        x_test = ss.get_samples().astype(float)
-        if bg_ss:
-            X = [x_test, bg_ss.get_samples().astype(float)]
-        else:
-            X = x_test
+        X = ss.get_samples().astype("float32")
 
         results = self.model.predict(X, batch_size=batch_size)
 
