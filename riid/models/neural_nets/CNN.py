@@ -18,8 +18,8 @@ class CNN(PyRIIDModel):
     """Convolutional neural network classifier."""
     def __init__(self, activation="relu", loss=None, optimizer=None,
                  metrics=None, final_activation="softmax", filters=None,
-                 kernel_sizes=None, dense_layer_sizes=None, readout="flatten",
-                 dropout=0, normalize="zscore"):
+                 kernel_sizes=None, dense_layer_sizes=None,
+                 dropout=0, normalize="sqrt_zscore"):
         """
         Args:
             activation: activation function to use for each dense layer
@@ -30,7 +30,6 @@ class CNN(PyRIIDModel):
             filters: list of number of filters for each conv layer of the CNN
             kernel_sizes: list of kernel sizes for each conv layer of the CNN
             dense_layer_sizes: sizes of the final dense layers after the convolutional layers
-            readout: strategy for aggregating token embeddings into a vector for classification
             dropout: optional dropout layer after each hidden layer
             normalize: whether (and how) to normalize input spectra
         """
@@ -45,7 +44,6 @@ class CNN(PyRIIDModel):
         self.filters = filters
         self.kernel_sizes = kernel_sizes
         self.dense_layer_sizes = dense_layer_sizes
-        self.readout = readout
         self.dropout = dropout
         self.normalize = normalize
 
@@ -128,17 +126,7 @@ class CNN(PyRIIDModel):
                 x = Activation(self.activation, name=f"activation_{layer}")(x)
                 x = MaxPooling1D(pool_size=2, name=f"maxpool_{layer}")(x)
 
-            if self.readout == "flatten":
-                x = Flatten(name="flatten")(x)
-            elif self.readout == "gap":
-                x = GlobalAveragePooling1D(name="gap")(x)
-            elif self.readout == "gmp":
-                x = GlobalMaxPooling1D(name="gmp")(x)
-            elif self.readout == "gap_gmp":
-                x = Concatenate(name="gap_gmp")([GlobalAveragePooling1D()(x), GlobalMaxPooling1D()(x)])
-            else:
-                raise ValueError("`self.readout` must be 'gap','flatten','gmp','gap_gmp'")
-
+            x = Flatten(name="flatten")(x)
             for layer, nodes in enumerate(self.dense_layer_sizes):
                 x = Dense(nodes, activation=self.activation, name=f"dense_{layer}")(x)
                 x = Dropout(self.dropout, name=f"dense_dropout_{layer}")(x)

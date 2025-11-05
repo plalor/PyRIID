@@ -20,8 +20,8 @@ class TBNN(PyRIIDModel):
     def __init__(self, activation="relu", loss=None, optimizer=None, metrics=None,
                  final_activation="softmax", embed_mode="linear", embed_inner=None,
                  embed_dim=None, pos_encoding="learnable", num_heads=None, ff_dim=None,
-                 num_layers=None, patch_size=None, stride=None, readout="cls", dropout=0,
-                 normalize="zscore"):
+                 num_layers=None, patch_size=None, stride=None, readout="flatten", dropout=0,
+                 normalize="sqrt_zscore"):
         """
         Args:
             activation: activation function to use for each dense layer

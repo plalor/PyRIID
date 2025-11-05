@@ -18,7 +18,7 @@ class BaselineTBNN(PyRIIDModel):
     """Transformer-based neural network classifier from Li et al. 2024."""
     def __init__(self, activation="relu", loss=None, optimizer=None, metrics=None,
                  final_activation="softmax", num_heads=None, ff_dim=None, num_layers=None,
-                 dropout=0, normalize="zscore"):
+                 dropout=0, normalize="sqrt_zscore"):
         """
         Args:
             activation: activation function to use for each dense layer

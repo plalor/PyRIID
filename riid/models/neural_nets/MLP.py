@@ -17,7 +17,7 @@ class MLP(PyRIIDModel):
     """Multi-layer perceptron classifier."""
     def __init__(self, activation="relu", loss=None, optimizer=None,
                  metrics=None, final_activation="softmax", hidden_layers=None,
-                 dropout=0, normalize="zscore"):
+                 dropout=0, normalize="sqrt_zscore"):
         """
         Args:
             activation: activation function to use for each dense layer

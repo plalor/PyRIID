@@ -17,7 +17,7 @@ class LSTMClassifier(PyRIIDModel):
     """LSTM classifier."""
     def __init__(self, loss=None, optimizer=None, metrics=None, final_activation="softmax",
                  hidden_layers=None, patch_size=None, stride=None, bidirectional=False, dropout=0,
-                 normalize="zscore"):
+                 normalize="sqrt_zscore"):
         """
         Args:
             loss: loss function to use for training
