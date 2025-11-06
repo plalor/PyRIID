@@ -57,3 +57,29 @@ def make_positions(x, num_patches):
 @register_keras_serializable(package="Custom", name="take_cls_token_fn")
 def take_cls_token_fn(x):
     return x[:, 0, :]
+
+
+def modify_dropout_rate(layer, dropout_rate):
+    """Modify dropout rate for specific layer types that have dropout parameters."""
+    from tensorflow.keras.layers import Dropout, SpatialDropout1D, MultiHeadAttention, LSTM
+    
+    if isinstance(layer, (Dropout, SpatialDropout1D)):
+        config = layer.get_config()
+        config['rate'] = dropout_rate
+    
+    elif isinstance(layer, MultiHeadAttention):
+        config = layer.get_config()
+        config['dropout'] = dropout_rate
+    
+    elif isinstance(layer, LSTM):
+        config = layer.get_config()
+        config['dropout'] = dropout_rate
+    
+    else:
+        config = layer.get_config()
+
+    return layer.__class__.from_config(config)
+
+
+def clone_optimizer(opt):
+    return tf.keras.optimizers.deserialize(tf.keras.optimizers.serialize(opt))

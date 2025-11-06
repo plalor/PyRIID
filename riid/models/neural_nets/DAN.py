@@ -1,12 +1,13 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dropout, SpatialDropout1D
+from tensorflow.keras.layers import Input
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
+from riid.models.functions import modify_dropout_rate, clone_optimizer
 from time import perf_counter as timer
 
 
@@ -43,21 +44,14 @@ class DAN(PyRIIDModel):
         if source_model is not None:
             self.classification_loss = source_model.loss
 
-            def modify_dropout(layer):
-                if isinstance(layer, Dropout):
-                    return Dropout(self.dropout, name=layer.name)
-                elif isinstance(layer, SpatialDropout1D):
-                    return SpatialDropout1D(self.dropout, name=layer.name)
-                return layer.__class__.from_config(layer.get_config())
-            
             self.source_model = clone_model(
                 source_model,
-                clone_function=modify_dropout
+                clone_function=lambda layer: modify_dropout_rate(layer, self.dropout)
             )
-            self.source_model.build(source_model.input_shape)
+            # self.source_model.build(source_model.input_shape)
             self.source_model.set_weights(source_model.get_weights())
             self.source_model.compile(
-                optimizer=source_model.optimizer,
+                optimizer=clone_optimizer(source_model.optimizer),
                 loss=source_model.loss,
                 metrics=source_model.metrics
             )
