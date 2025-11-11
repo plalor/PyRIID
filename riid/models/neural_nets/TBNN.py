@@ -259,10 +259,6 @@ class TBNN(PyRIIDModel):
                 x = Lambda(take_cls_token_fn, name="take_cls_token")(x)
             elif self.readout == "gap":
                 x = GlobalAveragePooling1D(name="token_gap")(x)
-            elif self.readout == "attn":
-                a = Dense(1, name="attn_logits")(x)
-                a = Softmax(axis=1, name="attn_weights")(a)
-                x = Lambda(lambda t: tf.reduce_sum(t[0]*t[1], axis=1), name="attn_pool")([a, x])
             elif self.readout == "flatten":
                 x = Flatten(name="token_flatten")(x)
             else:
