@@ -327,33 +327,21 @@ class DeepCORAL(PyRIIDModel):
         )
 
         ss.classified_by = self.model_id
-
+   
     @staticmethod
     def coral_loss(source_features, target_features):
-        """
-        Computes CORAL loss between source and target features.
-        Both are [batch_size, feature_dim] Tensors.
-        """
-        epsilon = 1e-8
-        # 1) per‐feature zero‐mean, unit‐std
-        s_mean = tf.reduce_mean(source_features, axis=0, keepdims=True)
-        s_std  = tf.math.reduce_std(source_features, axis=0, keepdims=True) + epsilon
-        t_mean = tf.reduce_mean(target_features, axis=0, keepdims=True)
-        t_std  = tf.math.reduce_std(target_features, axis=0, keepdims=True) + epsilon
+        """Computes CORAL loss between source and target features."""
+        s = source_features - tf.reduce_mean(source_features, axis=0, keepdims=True)
+        t = target_features - tf.reduce_mean(target_features, axis=0, keepdims=True)
 
-        s_norm = (source_features - s_mean) / s_std
-        t_norm = (target_features - t_mean) / t_std
+        n_s = tf.cast(tf.shape(s)[0], tf.float32)
+        n_t = tf.cast(tf.shape(t)[0], tf.float32)
+        d = tf.cast(tf.shape(s)[1], tf.float32)
 
-        # 2) covariance matrices on normalized features
-        n_s = tf.cast(tf.shape(s_norm)[0], tf.float32)
-        n_t = tf.cast(tf.shape(t_norm)[0], tf.float32)
-        cov_s = tf.matmul(s_norm, s_norm, transpose_a=True) / (n_s - 1)
-        cov_t = tf.matmul(t_norm, t_norm, transpose_a=True) / (n_t - 1)
-
-        # 3) Normalize by 4d^2
-        d = tf.cast(tf.shape(s_norm)[1], tf.float32)
+        cov_s = tf.matmul(s, s, transpose_a=True) / (n_s - 1.0)
+        cov_t = tf.matmul(t, t, transpose_a=True) / (n_t - 1.0)
         frob_sq = tf.reduce_sum(tf.square(cov_s - cov_t))
-        return frob_sq / (4 * d**2)
+        return frob_sq / (4.0 * d**2)
 
     @tf.function
     def train_step(self, x_s, y_s, x_t):
