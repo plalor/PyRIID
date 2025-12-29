@@ -36,7 +36,7 @@ class ADDA(PyRIIDModel):
         self.discriminator_loss = BinaryCrossentropy()
         self.dropout = dropout
         if metrics:
-            self.metrics = {getattr(metric, '__name__', str(metric)): metric for metric in metrics}
+            self.metrics = {(getattr(m, "name", None) or getattr(m, "__name__", None) or str(m)): m for m in metrics}
         else:
             self.metrics = {}
 
