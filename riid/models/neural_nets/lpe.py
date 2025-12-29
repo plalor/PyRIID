@@ -7,12 +7,12 @@ import keras
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from keras.api.activations import sigmoid, softmax
-from keras.api.callbacks import EarlyStopping
-from keras.api.layers import Dense, Dropout, Input
-from keras.api.losses import CategoricalCrossentropy, MeanSquaredError
-from keras.api.models import Model
-from keras.api.regularizers import L1L2
+from tensorflow.keras.activations import sigmoid, softmax
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.layers import Dense, Dropout, Input
+from tensorflow.keras.losses import CategoricalCrossentropy, MeanSquaredError
+from tensorflow.keras.models import Model
+from tensorflow.keras.regularizers import L1L2
 from scipy.interpolate import UnivariateSpline
 
 from riid import SampleSet

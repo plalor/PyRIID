@@ -3,7 +3,7 @@
 # the U.S. Government retains certain rights in this software.
 """This module contains custom Keras layers."""
 import tensorflow as tf
-from keras.api.layers import Layer
+from tensorflow.keras.layers import Layer
 from tensorflow.keras.utils import register_keras_serializable
 
 

@@ -4,7 +4,7 @@
 """This module contains custom loss functions."""
 import numpy as np
 import tensorflow as tf
-from keras.api import ops
+from tensorflow.keras import ops
 
 
 def negative_log_f1(y_true: np.ndarray, y_pred: np.ndarray):

@@ -5,8 +5,8 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from keras.api.layers import Add, Input, Multiply, Subtract
-from keras.api.models import Model
+from tensorflow.keras.layers import Add, Input, Multiply, Subtract
+from tensorflow.keras.models import Model
 
 from riid import SampleSet
 from riid.models.base import PyRIIDModel

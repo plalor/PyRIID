@@ -5,7 +5,7 @@
 from an ARAD latent space.
 """
 import numpy as np
-from keras.api.metrics import Accuracy, CategoricalCrossentropy
+from tensorflow.keras.metrics import Accuracy, CategoricalCrossentropy
 from sklearn.metrics import f1_score, mean_squared_error
 
 from riid import SeedMixer, StaticSynthesizer, get_dummy_seeds

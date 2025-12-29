@@ -60,7 +60,8 @@ class DeepCORAL(PyRIIDModel):
             print("WARNING: no pretrained source model was provided")
 
     def fit(self, source_ss: SampleSet, target_ss: SampleSet, source_val_ss: SampleSet, target_val_ss: SampleSet,
-            batch_size=64, epochs=None, patience=None, es_mode="min", es_monitor="tgt_val_loss", target_level="Isotope", verbose=False, training_time=None):
+            batch_size=64, epochs=None, patience=None, es_mode="min", es_monitor="tgt_val_loss", target_level="Isotope", 
+            validations_per_epoch=1, verbose=False, training_time=None):
         """Fit a model to the given `SampleSet`(s).
 
         Args:
@@ -74,8 +75,9 @@ class DeepCORAL(PyRIIDModel):
                 `m` >= 1 and the spectra are either foreground (AKA, "net") or gross.
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
-            patience: number of epochs to wait before early stopping
+            patience: number of validation checks to wait before early stopping
             target_level: `SampleSet.sources` column level to use
+            validations_per_epoch: number of times to run validation per epoch (default: 1)
             verbose: whether to show detailed model training output
             training_time: whether to terminate early if run exceeds prealloted time
 
@@ -185,6 +187,9 @@ class DeepCORAL(PyRIIDModel):
             normalization=source_ss.spectra_state,
         )
 
+        # Calculate steps between validations
+        steps_between_validations = steps_per_epoch // validations_per_epoch
+        
         # Training loop
         self.history = {"total_loss": [], "class_loss": [], "coral_loss": [], "src_val_loss": [], "tgt_val_loss": [], "coral_val_loss": []}
         for metric in self.metrics:
@@ -199,102 +204,117 @@ class DeepCORAL(PyRIIDModel):
         t0 = timer()
 
         it = iter(dataset)
+        early_stop = False
+        
         while True:
             epoch += 1
             if epochs is not None and epoch > epochs:
                 break
             
-            if verbose:
-                t1 = timer()
-                if epochs:
-                    print(f"Epoch {epoch}/{epochs}...", end="")
-                else:
-                    print(f"Epoch {epoch}...", end="")
-
-            total_loss_avg = tf.keras.metrics.Mean()
-            class_loss_avg = tf.keras.metrics.Mean()
-            coral_loss_avg = tf.keras.metrics.Mean()
-            
-            for step in range(steps_per_epoch):
-                (x_s, y_s), x_t = next(it)
-                total_loss, class_loss, coral_val = self.train_step(x_s, y_s, x_t)
-                total_loss_avg.update_state(total_loss)
-                class_loss_avg.update_state(class_loss)
-                coral_loss_avg.update_state(coral_val)
-
-            src_class_loss_avg = tf.keras.metrics.Mean()
-            tgt_class_loss_avg = tf.keras.metrics.Mean()
-            coral_val_loss_avg = tf.keras.metrics.Mean()
-            
-            src_metric_avgs = {name: tf.keras.metrics.Mean() for name in self.metrics}
-            tgt_metric_avgs = {name: tf.keras.metrics.Mean() for name in self.metrics}
-            
-            for (x_s_val, y_s_val), (x_t_val, y_t_val) in val_dataset:
-                y_s_pred = self.model(x_s_val, training=False)
-                loss_s = self.classification_loss(y_s_val, y_s_pred)
-                src_class_loss_avg.update_state(loss_s)
-                
-                y_t_pred = self.model(x_t_val, training=False)
-                loss_t = self.classification_loss(y_t_val, y_t_pred)
-                tgt_class_loss_avg.update_state(loss_t)
-                
-                f_s_val = self.feature_extractor(x_s_val, training=False)
-                f_t_val = self.feature_extractor(x_t_val, training=False)
-                coral_val_loss = self.coral_loss(f_s_val, f_t_val)
-                coral_val_loss_avg.update_state(coral_val_loss)
-                
-                for metric_name, metric_fn in self.metrics.items():
-                    src_metric = metric_fn(y_s_val.numpy(), y_s_pred.numpy())
-                    tgt_metric = metric_fn(y_t_val.numpy(), y_t_pred.numpy())
-                    src_metric_avgs[metric_name].update_state(src_metric)
-                    tgt_metric_avgs[metric_name].update_state(tgt_metric)
-
-            total_loss = total_loss_avg.result().numpy()
-            class_loss = class_loss_avg.result().numpy()
-            coral_loss = coral_loss_avg.result().numpy()
-            src_val_loss = src_class_loss_avg.result().numpy()
-            tgt_val_loss = tgt_class_loss_avg.result().numpy()
-            coral_val_loss = coral_val_loss_avg.result().numpy()
-
-            self.history["total_loss"].append(total_loss)
-            self.history["class_loss"].append(class_loss)
-            self.history["coral_loss"].append(coral_loss)
-            self.history["src_val_loss"].append(src_val_loss)
-            self.history["tgt_val_loss"].append(tgt_val_loss)
-            self.history["coral_val_loss"].append(coral_val_loss)
-            
-            for metric in self.metrics:
-                metric_name = getattr(metric, '__name__', str(metric))
-                self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric].result().numpy())
-                self.history[f"tgt_val_{metric_name}"].append(tgt_metric_avgs[metric].result().numpy())
-
-            if verbose:
-                print(f"Finished in {timer()-t1:.0f} seconds")
-                print("  "
-                      f"total_loss: {total_loss:.3g} - "
-                      f"class_loss: {class_loss:.3g} - "
-                      f"coral_loss: {coral_loss:.3g} - "
-                      f"src_val_loss: {src_val_loss:.3g} - "
-                      f"tgt_val_loss: {tgt_val_loss:.3g} - "
-                      f"coral_val_loss: {coral_val_loss:.3g}")
-
-            current_metric = self.history[es_monitor][-1]
-            is_better = current_metric < best_metric if es_mode == "min" else current_metric > best_metric
-            
-            if is_better:
-                best_metric = current_metric
-                best_weights = self.model.get_weights()
-                wait = 0
-            else:
-                wait += 1
-                if patience is not None and wait > patience:
-                    if verbose:
-                        print(f"No improvement for {patience} epochs, stopping early.")
-                    break
-
-            if timer() - t0 > training_time:
+            # Loop through validations within this epoch
+            for val_idx in range(validations_per_epoch):
                 if verbose:
-                    print("Reached preallotted training time, terminating.")
+                    t1 = timer()
+                    if epochs:
+                        if validations_per_epoch > 1:
+                            print(f"Epoch {epoch}/{epochs} - Validation {val_idx+1}/{validations_per_epoch}...", end="")
+                        else:
+                            print(f"Epoch {epoch}/{epochs}...", end="")
+                    else:
+                        if validations_per_epoch > 1:
+                            print(f"Epoch {epoch} - Validation {val_idx+1}/{validations_per_epoch}...", end="")
+                        else:
+                            print(f"Epoch {epoch}...", end="")
+
+                total_loss_avg = tf.keras.metrics.Mean()
+                class_loss_avg = tf.keras.metrics.Mean()
+                coral_loss_avg = tf.keras.metrics.Mean()
+                
+                for step in range(steps_between_validations):
+                    (x_s, y_s), x_t = next(it)
+                    total_loss, class_loss, coral_val = self.train_step(x_s, y_s, x_t)
+                    total_loss_avg.update_state(total_loss)
+                    class_loss_avg.update_state(class_loss)
+                    coral_loss_avg.update_state(coral_val)
+
+                src_class_loss_avg = tf.keras.metrics.Mean()
+                tgt_class_loss_avg = tf.keras.metrics.Mean()
+                coral_val_loss_avg = tf.keras.metrics.Mean()
+                
+                src_metric_avgs = {name: tf.keras.metrics.Mean() for name in self.metrics}
+                tgt_metric_avgs = {name: tf.keras.metrics.Mean() for name in self.metrics}
+                
+                for (x_s_val, y_s_val), (x_t_val, y_t_val) in val_dataset:
+                    y_s_pred = self.model(x_s_val, training=False)
+                    loss_s = self.classification_loss(y_s_val, y_s_pred)
+                    src_class_loss_avg.update_state(loss_s)
+                    
+                    y_t_pred = self.model(x_t_val, training=False)
+                    loss_t = self.classification_loss(y_t_val, y_t_pred)
+                    tgt_class_loss_avg.update_state(loss_t)
+                    
+                    f_s_val = self.feature_extractor(x_s_val, training=False)
+                    f_t_val = self.feature_extractor(x_t_val, training=False)
+                    coral_val_loss = self.coral_loss(f_s_val, f_t_val)
+                    coral_val_loss_avg.update_state(coral_val_loss)
+                    
+                    for metric_name, metric_fn in self.metrics.items():
+                        src_metric = metric_fn(y_s_val.numpy(), y_s_pred.numpy())
+                        tgt_metric = metric_fn(y_t_val.numpy(), y_t_pred.numpy())
+                        src_metric_avgs[metric_name].update_state(src_metric)
+                        tgt_metric_avgs[metric_name].update_state(tgt_metric)
+
+                total_loss = total_loss_avg.result().numpy()
+                class_loss = class_loss_avg.result().numpy()
+                coral_loss = coral_loss_avg.result().numpy()
+                src_val_loss = src_class_loss_avg.result().numpy()
+                tgt_val_loss = tgt_class_loss_avg.result().numpy()
+                coral_val_loss = coral_val_loss_avg.result().numpy()
+
+                self.history["total_loss"].append(total_loss)
+                self.history["class_loss"].append(class_loss)
+                self.history["coral_loss"].append(coral_loss)
+                self.history["src_val_loss"].append(src_val_loss)
+                self.history["tgt_val_loss"].append(tgt_val_loss)
+                self.history["coral_val_loss"].append(coral_val_loss)
+                
+                for metric in self.metrics:
+                    metric_name = getattr(metric, '__name__', str(metric))
+                    self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric].result().numpy())
+                    self.history[f"tgt_val_{metric_name}"].append(tgt_metric_avgs[metric].result().numpy())
+
+                if verbose:
+                    print(f"Finished in {timer()-t1:.0f} seconds")
+                    print("  "
+                          f"total_loss: {total_loss:.3g} - "
+                          f"class_loss: {class_loss:.3g} - "
+                          f"coral_loss: {coral_loss:.3g} - "
+                          f"src_val_loss: {src_val_loss:.3g} - "
+                          f"tgt_val_loss: {tgt_val_loss:.3g} - "
+                          f"coral_val_loss: {coral_val_loss:.3g}")
+
+                current_metric = self.history[es_monitor][-1]
+                is_better = current_metric < best_metric if es_mode == "min" else current_metric > best_metric
+                
+                if is_better:
+                    best_metric = current_metric
+                    best_weights = self.model.get_weights()
+                    wait = 0
+                else:
+                    wait += 1
+                    if patience is not None and wait > patience:
+                        if verbose:
+                            print(f"No improvement for {patience} validation checks, stopping early.")
+                        early_stop = True
+                        break
+
+                if timer() - t0 > training_time:
+                    if verbose:
+                        print("Reached preallotted training time, terminating.")
+                    early_stop = True
+                    break
+            
+            if early_stop:
                 break
 
         if best_weights is not None:

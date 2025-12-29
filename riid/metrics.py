@@ -2,6 +2,8 @@
 # Under the terms of Contract DE-NA0003525 with NTESS,
 # the U.S. Government retains certain rights in this software.
 """This module provides custom model metrics."""
+import tensorflow as tf
+from tensorflow.keras import ops
 import numpy as np
 import sklearn
 
@@ -20,8 +22,6 @@ def multi_f1(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     Returns:
         Multi F1-score value(s)
     """
-    from keras.api import ops
-
     diff = y_true - y_pred
     negs = ops.clip(diff, -1.0, 0.0)
     false_positive = -ops.sum(negs, axis=-1)
@@ -44,8 +44,6 @@ def APE_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
         APE-score value(s)
 
     """
-    from keras.api import ops
-
     abs_diff = ops.abs(y_true - y_pred)
     avg_total_abs_error = ops.mean(ops.sum(abs_diff, axis=1))
     ape = 1 - avg_total_abs_error / 2
@@ -62,8 +60,6 @@ def accuracy_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     Returns:
         Accuracy score as a float between 0 and 1
     """
-    from keras.api import ops
-    
     y_true_classes = ops.argmax(y_true, axis=-1)
     y_pred_classes = ops.argmax(y_pred, axis=-1)
     correct = ops.cast(ops.equal(y_true_classes, y_pred_classes), 'float32')
@@ -83,8 +79,6 @@ def f1_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     Returns:
         Weighted F1 score as a float between 0 and 1
     """
-    from keras.api import ops
-    
     y_true_classes = ops.argmax(y_true, axis=-1)
     y_pred_classes = ops.argmax(y_pred, axis=-1)
     n_classes = ops.shape(y_true)[-1]
@@ -116,9 +110,6 @@ def single_f1(y_true: np.ndarray, y_pred: np.ndarray):
     Returns:
         F1-score value(s)
     """
-    import tensorflow as tf
-    from keras.api import ops
-
     a = tf.dtypes.cast(y_true == ops.max(y_true, axis=1)[:, None], tf.float32)
     b = tf.dtypes.cast(y_pred == ops.max(y_pred, axis=1)[:, None], tf.float32)
 

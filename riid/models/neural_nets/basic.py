@@ -4,14 +4,14 @@
 """This module contains a simple neural network."""
 import pandas as pd
 import tensorflow as tf
-from keras.api.callbacks import EarlyStopping
-from keras.api.layers import Dense, Input, Dropout
-from keras.api.losses import CategoricalCrossentropy
-from keras.api.metrics import F1Score, Precision, Recall
-from keras.api.models import Model
-from keras.api.optimizers import Adam
-from keras.api.regularizers import l1, l2
-from keras.api.utils import split_dataset
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.layers import Dense, Input, Dropout
+from tensorflow.keras.losses import CategoricalCrossentropy
+from tensorflow.keras.metrics import F1Score, Precision, Recall
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.regularizers import l1, l2
+from tensorflow.keras.utils import split_dataset
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel

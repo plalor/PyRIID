@@ -7,17 +7,17 @@ from typing import List
 import keras
 import pandas as pd
 import tensorflow as tf
-from keras.api.activations import sigmoid, softplus
-from keras.api.callbacks import EarlyStopping, ReduceLROnPlateau
-from keras.api.initializers import GlorotNormal, HeNormal
-from keras.api.layers import (BatchNormalization, Concatenate, Conv1D,
+from tensorflow.keras.activations import sigmoid, softplus
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.initializers import GlorotNormal, HeNormal
+from tensorflow.keras.layers import (BatchNormalization, Concatenate, Conv1D,
                               Conv1DTranspose, Dense, Dropout, Flatten, Input,
                               MaxPool1D, Reshape, UpSampling1D)
-from keras.api.losses import kl_divergence, log_cosh
-from keras.api.metrics import MeanSquaredError
-from keras.api.models import Model
-from keras.api.optimizers import Adam, Nadam
-from keras.api.regularizers import L1L2, L2
+from tensorflow.keras.losses import KLDivergence, LogCosh
+from tensorflow.keras.metrics import MeanSquaredError
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam, Nadam
+from tensorflow.keras.regularizers import L1L2, L2
 from scipy.spatial.distance import jensenshannon
 from scipy.stats import entropy
 
@@ -126,8 +126,8 @@ class ARADv1TF(Model):
         decoded = self.decoder(encoded)
 
         # Compute loss
-        logcosh_loss = log_cosh(x, decoded)
-        kld_loss = kl_divergence(self.sparsities, encoded)
+        logcosh_loss = LogCosh(x, decoded)
+        kld_loss = KLDivergence(self.sparsities, encoded)
         loss = logcosh_loss + self.penalty_weight * kld_loss
         self.add_loss(loss)
 
@@ -256,7 +256,7 @@ class ARADv2TF(Model):
             tf.reshape(q_sum, (-1, 1))
         )
         m = (p_norm + q_norm) / 2
-        js_divergence = (kl_divergence(p_norm, m) + kl_divergence(q_norm, m)) / 2
+        js_divergence = (KLDivergence(p_norm, m) + KLDivergence(q_norm, m)) / 2
         loss = tf.math.sqrt(js_divergence)
         self.add_loss(loss)
 
