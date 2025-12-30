@@ -200,8 +200,7 @@ class DeepJDOT(PyRIIDModel):
         
         # Training loop
         self.history = {"total_loss": [], "class_loss": [], "ot_loss": [], "src_val_loss": [], "tgt_val_loss": [], "ot_val_loss": []}
-        for metric in self.metrics:
-            metric_name = getattr(metric, '__name__', str(metric))
+        for metric_name in self.metrics:
             self.history[f"src_val_{metric_name}"] = []
             self.history[f"tgt_val_{metric_name}"] = []
         
@@ -238,7 +237,7 @@ class DeepJDOT(PyRIIDModel):
                 class_loss_avg = tf.keras.metrics.Mean()
                 ot_loss_avg = tf.keras.metrics.Mean()
                 for step in range(steps_between_validations):
-                    (x_s, y_s), x_t = next(it)
+                    (x_s, y_s), (x_t,) = next(it)
                     total_loss, class_loss, ot_loss = self.train_step(x_s, y_s, x_t)
                     total_loss_avg.update_state(total_loss)
                     class_loss_avg.update_state(class_loss)
@@ -283,10 +282,9 @@ class DeepJDOT(PyRIIDModel):
                 self.history["tgt_val_loss"].append(tgt_val_loss)
                 self.history["ot_val_loss"].append(ot_val_loss)
                 
-                for metric in self.metrics:
-                    metric_name = getattr(metric, '__name__', str(metric))
-                    self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric].result().numpy())
-                    self.history[f"tgt_val_{metric_name}"].append(tgt_metric_avgs[metric].result().numpy())
+                for metric_name in self.metrics:
+                    self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric_name].result().numpy())
+                    self.history[f"tgt_val_{metric_name}"].append(tgt_metric_avgs[metric_name].result().numpy())
 
                 if verbose:
                     print(f"Finished in {timer()-t1:.0f} seconds")

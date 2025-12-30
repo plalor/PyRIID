@@ -3,7 +3,7 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import Dense, Input, Dropout, Lambda, Embedding, Add, MultiHeadAttention, \
-    LayerNormalization, Conv1D, TimeDistributed, MaxPooling1D, Flatten, Activation, Softmax, GlobalAveragePooling1D
+    LayerNormalization, Conv1D, TimeDistributed, MaxPooling1D, Flatten, Activation, GlobalAveragePooling1D
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.optimizers import Adam

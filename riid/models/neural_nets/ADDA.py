@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Input, Dropout, SpatialDropout1D, Activation
+from tensorflow.keras.layers import Dense, Input, Dropout
 from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
@@ -222,8 +222,7 @@ class ADDA(PyRIIDModel):
         
         # Training loop
         self.history = {"d_loss": [], "t_loss": [], "src_val_loss": [], "tgt_val_loss": [], "d_val_loss": []}
-        for metric in self.metrics:
-            metric_name = getattr(metric, '__name__', str(metric))
+        for metric_name in self.metrics:
             self.history[f"src_val_{metric_name}"] = []
             self.history[f"tgt_val_{metric_name}"] = []
         
@@ -313,10 +312,9 @@ class ADDA(PyRIIDModel):
                 self.history["tgt_val_loss"].append(tgt_val_loss)
                 self.history["d_val_loss"].append(d_val_loss)
                 
-                for metric in self.metrics:
-                    metric_name = getattr(metric, '__name__', str(metric))
-                    self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric].result().numpy())
-                    self.history[f"tgt_val_{metric_name}"].append(tgt_metric_avgs[metric].result().numpy())
+                for metric_name in self.metrics:
+                    self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric_name].result().numpy())
+                    self.history[f"tgt_val_{metric_name}"].append(tgt_metric_avgs[metric_name].result().numpy())
             
                 if verbose:
                     print(f"Finished in {timer()-t1:.0f} seconds")

@@ -1,47 +1,39 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Input, Dropout
-from tensorflow.keras.losses import BinaryCrossentropy
+from tensorflow.keras.layers import Dense, Input
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.keras.optimizers import Adam
 
 from riid import SampleSet, SpectraType
 from riid.models.base import ModelInput, PyRIIDModel
-from riid.models.layers import GradientReversalLayer
-from riid.models.functions import modify_dropout_rate, clone_optimizer
+from riid.models.functions import modify_dropout_rate, clone_optimizer, poisson_resample
 from time import perf_counter as timer
 
 
-class DANN(PyRIIDModel):
-    """Domain Adversarial Neural Network classifier."""
-    def __init__(self, activation="relu", d_optimizer=None, f_optimizer=None,
-                 source_model=None, grl_hidden_layers=None, use_da_scheduler=True,
-                 da_param=10, dropout=0, metrics=None):
+class SimCLR(PyRIIDModel):
+    """Classifier using SimCLR-style contrastive learning for domain adaptation."""
+    def __init__(self, optimizer=None, source_model=None, temperature=0.1, 
+                 contrastive_weight=1.0, projection_dim=None, effective_counts=0, 
+                 dropout=0, metrics=None):
         """
         Args:
-            activation: activation function to use for discriminator dense layer
-            d_optimizer: tensorflow optimizer or optimizer name for the discriminator
-            f_optimizer: tensorflow optimizer or optimizer name for the feature extractor
+            optimizer: tensorflow optimizer or optimizer name
             source_model: pretrained source model
-            grl_hidden_layers: sizes of the gradient reversal dense layers
-            use_da_scheduler: whether to use a scheduler for ramping up lambda
-            da_param: value for gamma (if using a da scheduler), otherwise value for lambda
-            dropout: dropout rate to apply to the adapted model and discriminator layers
+            temperature: temperature parameter for InfoNCE loss
+            contrastive_weight: weight for the contrastive loss
+            projection_dim: list of dimensions for projection head layers
+            effective_counts: effective counts for Poisson resampling
+            dropout: dropout rate to apply to the encoder
             metrics: list of metric functions
         """
         super().__init__()
 
-        self.activation = activation
-        self.d_optimizer = d_optimizer or Adam(learning_rate=0.001)
-        self.f_optimizer = f_optimizer or Adam(learning_rate=0.001)
-        self.grl_hidden_layers = grl_hidden_layers
-        self.use_da_scheduler = use_da_scheduler
-        if self.use_da_scheduler:
-            self.gamma = da_param
-        else:
-            self.lmbda = da_param
-        self.discriminator_loss = BinaryCrossentropy()
+        self.optimizer = optimizer or Adam(learning_rate=0.001)
+        self.temperature = temperature
+        self.contrastive_weight = contrastive_weight
+        self.projection_dim = projection_dim
+        self.effective_counts = effective_counts
         self.dropout = dropout
         if metrics:
             self.metrics = {(getattr(m, "name", None) or getattr(m, "__name__", None) or str(m)): m for m in metrics}
@@ -51,26 +43,35 @@ class DANN(PyRIIDModel):
         if source_model is not None:
             self.classification_loss = source_model.loss
 
-            self.source_model = clone_model(
+            # Create encoder with dropout
+            adapted_model = clone_model(
                 source_model,
                 clone_function=lambda layer: modify_dropout_rate(layer, self.dropout)
             )
-            # self.source_model.build(source_model.input_shape)
-            self.source_model.set_weights(source_model.get_weights())
-            self.source_model.compile(
+            adapted_model.set_weights(source_model.get_weights())
+            adapted_model.compile(
                 optimizer=clone_optimizer(source_model.optimizer),
                 loss=source_model.loss,
                 metrics=source_model.metrics
             )
 
-            all_layers = self.source_model.layers
-            feature_extractor_input = self.source_model.input
-            feature_extractor_output = all_layers[-2].output
-            self.feature_extractor = Model(inputs=feature_extractor_input, outputs=feature_extractor_output, name="feature_extractor")
+            # Extract encoder and classifier
+            all_layers = adapted_model.layers
+            encoder_input = adapted_model.input
+            encoder_output = all_layers[-2].output
+            self.encoder = Model(inputs=encoder_input, outputs=encoder_output, name="encoder")
 
-            classifier_input = Input(shape=feature_extractor_output.shape[1:], name="feature_extractor_output")
+            classifier_input = Input(shape=encoder_output.shape[1:], name="encoder_output")
             classifier_output = all_layers[-1](classifier_input)
             self.classifier = Model(inputs=classifier_input, outputs=classifier_output, name="classifier")
+
+            # Build projection head for contrastive learning
+            projection_input = Input(shape=encoder_output.shape[1:], name="features")
+            x = projection_input
+            for i, dim in enumerate(self.projection_dim):
+                act = "relu" if i < len(self.projection_dim) - 1 else None
+                x = Dense(dim, activation=act, name=f"projection_{i}")(x)
+            self.projection_head = Model(inputs=projection_input, outputs=x, name="projection_head")
         else:
             print("WARNING: no pretrained source model was provided")
 
@@ -91,6 +92,8 @@ class DANN(PyRIIDModel):
             batch_size: number of samples per gradient update
             epochs: maximum number of training iterations
             patience: number of validation checks to wait before early stopping
+            es_mode: 'min' for loss-like metrics, 'max' for accuracy-like metrics
+            es_monitor: metric to monitor for early stopping
             target_level: `SampleSet.sources` column level to use
             validations_per_epoch: number of times to run validation per epoch (default: 1)
             verbose: whether to show detailed model training output
@@ -118,7 +121,7 @@ class DANN(PyRIIDModel):
         if training_time is None:
             training_time = np.inf
             epochs = epochs or 20
-
+                
         # Preparing training and validation data
         X_source = source_ss.get_samples().astype("float32")
         X_target = target_ss.get_samples().astype("float32")
@@ -188,29 +191,17 @@ class DANN(PyRIIDModel):
               .prefetch(tf.data.AUTOTUNE)
         )
 
-        # Build discriminator
-        input_shape = self.feature_extractor.output_shape[1]
-        inputs = Input(shape=(input_shape,), name="features")
-        self.grl_layer = GradientReversalLayer()
-        grl = self.grl_layer(inputs)
-        for i, nodes in enumerate(self.grl_hidden_layers):
-            grl = Dense(nodes, activation=self.activation, name=f"dense_{i}")(grl)
-            if self.dropout > 0:
-                grl = Dropout(self.dropout, name=f"dropout_{i}")(grl)
-        output = Dense(1, activation="sigmoid", name="discriminator")(grl)
-        self.discriminator = Model(inputs, output, name="Discriminator")
-
-        # Define DANN model
+        # Define final model (encoder + classifier, projection head discarded at inference)
         self.model = Model(
-            inputs=self.feature_extractor.input,
-            outputs=self.classifier(self.feature_extractor.output)
+            inputs=self.encoder.input,
+            outputs=self.classifier(self.encoder.output)
         )
-        self.model.compile(loss = self.classification_loss)
+        self.model.compile(loss=self.classification_loss)
 
         # Update model information
         self._update_info(
             target_level=target_level,
-            model_outputs = source_ss.sources.T.groupby(target_level, sort=False).sum().T.columns.values.tolist(),
+            model_outputs=model_outputs,
             normalization=source_ss.spectra_state,
         )
 
@@ -218,7 +209,13 @@ class DANN(PyRIIDModel):
         steps_between_validations = steps_per_epoch // validations_per_epoch
         
         # Training loop
-        self.history = {"total_loss": [], "class_loss": [], "domain_loss": [], "src_val_loss": [], "tgt_val_loss": [], "domain_val_loss": []}
+        self.history = {
+            "total_loss": [], 
+            "class_loss": [], 
+            "contrastive_loss": [], 
+            "src_val_loss": [], 
+            "tgt_val_loss": []
+        }
         for metric_name in self.metrics:
             self.history[f"src_val_{metric_name}"] = []
             self.history[f"tgt_val_{metric_name}"] = []
@@ -252,30 +249,19 @@ class DANN(PyRIIDModel):
                         else:
                             print(f"Epoch {epoch}...", end="")
 
-                if self.use_da_scheduler:
-                    if epochs is not None:
-                        p = (epoch - 1 + (val_idx + 1) / validations_per_epoch) / epochs
-                    else:
-                        p = (epoch - 1 + (val_idx + 1) / validations_per_epoch) / 10
-                    new_lmbda = 2.0 / (1.0 + np.exp(-self.gamma * p)) - 1.0
-                else:
-                    new_lmbda = self.lmbda
-                tf.keras.backend.set_value(self.grl_layer.lmbda, new_lmbda)
-
                 total_loss_avg = tf.keras.metrics.Mean()
                 class_loss_avg = tf.keras.metrics.Mean()
-                domain_loss_avg = tf.keras.metrics.Mean()
+                contrastive_loss_avg = tf.keras.metrics.Mean()
+
                 for step in range(steps_between_validations):
                     (x_s, y_s), (x_t,) = next(it)
-                    domain_loss = self.train_discriminator_step(x_s, x_t)
-                    total_loss, class_loss = self.train_feature_extractor_step(x_s, y_s, x_t)
+                    total_loss, class_loss, contrastive_val = self.train_step(x_s, y_s, x_t)
                     total_loss_avg.update_state(total_loss)
                     class_loss_avg.update_state(class_loss)
-                    domain_loss_avg.update_state(domain_loss)
+                    contrastive_loss_avg.update_state(contrastive_val)
 
                 src_class_loss_avg = tf.keras.metrics.Mean()
                 tgt_class_loss_avg = tf.keras.metrics.Mean()
-                domain_val_loss_avg = tf.keras.metrics.Mean()
                 
                 src_metric_avgs = {name: tf.keras.metrics.Mean() for name in self.metrics}
                 tgt_metric_avgs = {name: tf.keras.metrics.Mean() for name in self.metrics}
@@ -284,24 +270,10 @@ class DANN(PyRIIDModel):
                     y_s_pred = self.model(x_s_val, training=False)
                     loss_s = self.classification_loss(y_s_val, y_s_pred)
                     src_class_loss_avg.update_state(loss_s)
-                
+                    
                     y_t_pred = self.model(x_t_val, training=False)
                     loss_t = self.classification_loss(y_t_val, y_t_pred)
                     tgt_class_loss_avg.update_state(loss_t)
-                    
-                    f_s_val = self.feature_extractor(x_s_val, training=False)
-                    f_t_val = self.feature_extractor(x_t_val, training=False)
-                
-                    d_s_val = self.discriminator(f_s_val, training=False)
-                    d_t_val = self.discriminator(f_t_val, training=False)
-                
-                    y_s_domain = tf.zeros_like(d_s_val)
-                    y_t_domain = tf.ones_like(d_t_val)
-                
-                    loss_s_domain = self.discriminator_loss(y_s_domain, d_s_val)
-                    loss_t_domain = self.discriminator_loss(y_t_domain, d_t_val)
-                    domain_val_loss = loss_s_domain + loss_t_domain
-                    domain_val_loss_avg.update_state(domain_val_loss)
                     
                     for metric_name, metric_fn in self.metrics.items():
                         src_metric = metric_fn(y_s_val.numpy(), y_s_pred.numpy())
@@ -311,17 +283,15 @@ class DANN(PyRIIDModel):
 
                 total_loss = total_loss_avg.result().numpy()
                 class_loss = class_loss_avg.result().numpy()
-                domain_loss = domain_loss_avg.result().numpy()
+                contrastive_loss = contrastive_loss_avg.result().numpy()
                 src_val_loss = src_class_loss_avg.result().numpy()
                 tgt_val_loss = tgt_class_loss_avg.result().numpy()
-                domain_val_loss = domain_val_loss_avg.result().numpy()
-                
+
                 self.history["total_loss"].append(total_loss)
                 self.history["class_loss"].append(class_loss)
-                self.history["domain_loss"].append(domain_loss)
+                self.history["contrastive_loss"].append(contrastive_loss)
                 self.history["src_val_loss"].append(src_val_loss)
                 self.history["tgt_val_loss"].append(tgt_val_loss)
-                self.history["domain_val_loss"].append(domain_val_loss)
                 
                 for metric_name in self.metrics:
                     self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric_name].result().numpy())
@@ -332,10 +302,9 @@ class DANN(PyRIIDModel):
                     print("  "
                           f"total_loss: {total_loss:.3g} - "
                           f"class_loss: {class_loss:.3g} - "
-                          f"domain_loss: {domain_loss:.3g} - "
+                          f"contrastive_loss: {contrastive_loss:.3g} - "
                           f"src_val_loss: {src_val_loss:.3g} - "
-                          f"tgt_val_loss: {tgt_val_loss:.3g} - "
-                          f"domain_val_loss: {domain_val_loss:.3g}")
+                          f"tgt_val_loss: {tgt_val_loss:.3g}")
 
                 current_metric = self.history[es_monitor][-1]
                 is_better = current_metric < best_metric if es_mode == "min" else current_metric > best_metric
@@ -393,49 +362,52 @@ class DANN(PyRIIDModel):
         ss.classified_by = self.model_id
 
     @tf.function
-    def train_discriminator_step(self, x_s, x_t):
+    def train_step(self, x_s, y_s, x_t):
+        """Train on source classification + target contrastive loss."""
         with tf.GradientTape() as tape:
-            # extract features
-            f_s = self.feature_extractor(x_s, training=False)
-            f_t = self.feature_extractor(x_t, training=False)
+            # Classification loss on source data
+            f_s = self.encoder(x_s, training=True)
+            preds_s = self.classifier(f_s, training=True)
+            class_loss = self.classification_loss(y_s, preds_s)
 
-            # run through discriminator branch
-            d_s = self.discriminator(f_s, training=True)
-            d_t = self.discriminator(f_t, training=True)
+            # Contrastive loss on target data
+            # Generate two Poisson-resampled views per spectrum
+            x_t_view1 = poisson_resample(x_t, self.effective_counts)
+            x_t_view2 = poisson_resample(x_t, self.effective_counts)
 
-            # source/target domain labels
-            y_s = tf.zeros_like(d_s)
-            y_t = tf.ones_like(d_t)
+            # Extract features and project
+            f_t_view1 = self.encoder(x_t_view1, training=True)
+            f_t_view2 = self.encoder(x_t_view2, training=True)
+            
+            z_t_view1 = self.projection_head(f_t_view1, training=True)
+            z_t_view2 = self.projection_head(f_t_view2, training=True)
 
-            # binary‐crossentropy on both source and target
-            loss_s = self.discriminator_loss(y_s, d_s)
-            loss_t = self.discriminator_loss(y_t, d_t)
-            domain_loss = loss_s + loss_t
+            # InfoNCE contrastive loss
+            contrastive_loss = self.info_nce_loss(z_t_view1, z_t_view2)
 
-        # gradients only on the discriminator's weights
-        grads = tape.gradient(domain_loss, self.discriminator.trainable_variables)
-        self.d_optimizer.apply_gradients(zip(grads, self.discriminator.trainable_variables))
-        return domain_loss
+            total_loss = class_loss + self.contrastive_weight * contrastive_loss
 
-    @tf.function
-    def train_feature_extractor_step(self, x_s, y_s, x_t):
-        with tf.GradientTape() as tape:
-            # class loss
-            f_s = self.feature_extractor(x_s, training=True)
-            preds = self.classifier(f_s, training=True)
-            class_loss = self.classification_loss(y_s, preds)
+        # Update encoder, classifier, and projection head
+        trainable_vars = (
+            self.encoder.trainable_variables + 
+            self.classifier.trainable_variables + 
+            self.projection_head.trainable_variables
+        )
+        grads = tape.gradient(total_loss, trainable_vars)
+        self.optimizer.apply_gradients(zip(grads, trainable_vars))
+        
+        return total_loss, class_loss, contrastive_loss
 
-            # adversarial loss
-            f_t = self.feature_extractor(x_t, training=True)
-            d_pred_t = self.discriminator(f_t, training=False)
-            # "fake" label = 0 (we want D to predict "source" on target features)
-            fake_labels = tf.zeros_like(d_pred_t)
-            adv_loss = self.discriminator_loss(fake_labels, d_pred_t)
+    def info_nce_loss(self, z1, z2):
+        """Compute InfoNCE loss for contrastive learning"""
+        z1 = tf.math.l2_normalize(z1, axis=1)
+        z2 = tf.math.l2_normalize(z2, axis=1)
 
-            total_loss = class_loss + adv_loss
+        logits12 = tf.matmul(z1, z2, transpose_b=True) / self.temperature
+        logits21 = tf.matmul(z2, z1, transpose_b=True) / self.temperature
 
-        # gradients on feature_extractor + classifier only
-        variables = self.feature_extractor.trainable_variables + self.classifier.trainable_variables
-        grads = tape.gradient(total_loss, variables)
-        self.f_optimizer.apply_gradients(zip(grads, variables))
-        return total_loss, class_loss
+        labels = tf.range(tf.shape(z1)[0])
+
+        loss12 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits12))
+        loss21 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits21))
+        return 0.5 * (loss12 + loss21)

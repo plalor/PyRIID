@@ -14,5 +14,7 @@ from riid.models.neural_nets.ADDA import ADDA
 from riid.models.neural_nets.DeepCORAL import DeepCORAL
 from riid.models.neural_nets.DeepJDOT import DeepJDOT
 from riid.models.neural_nets.DAN import DAN
+from riid.models.neural_nets.MeanTeacher import MeanTeacher
+from riid.models.neural_nets.SimCLR import SimCLR
 
 __all__ = ["LabelProportionEstimator", "MLPClassifier"]

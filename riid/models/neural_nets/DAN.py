@@ -205,8 +205,7 @@ class DAN(PyRIIDModel):
         
         # Training loop
         self.history = {"total_loss": [], "class_loss": [], "mmd_loss": [], "src_val_loss": [], "tgt_val_loss": [], "mmd_val_loss": []}
-        for metric in self.metrics:
-            metric_name = getattr(metric, '__name__', str(metric))
+        for metric_name in self.metrics:
             self.history[f"src_val_{metric_name}"] = []
             self.history[f"tgt_val_{metric_name}"] = []
         
@@ -244,7 +243,7 @@ class DAN(PyRIIDModel):
                 mmd_loss_avg = tf.keras.metrics.Mean()
 
                 for step in range(steps_between_validations):
-                    (x_s, y_s), x_t = next(it)
+                    (x_s, y_s), (x_t,) = next(it)
                     total_loss, class_loss, mmd_val = self.train_step(x_s, y_s, x_t)
                     total_loss_avg.update_state(total_loss)
                     class_loss_avg.update_state(class_loss)
@@ -291,10 +290,9 @@ class DAN(PyRIIDModel):
                 self.history["tgt_val_loss"].append(tgt_val_loss)
                 self.history["mmd_val_loss"].append(mmd_val_loss)
                 
-                for metric in self.metrics:
-                    metric_name = getattr(metric, '__name__', str(metric))
-                    self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric].result().numpy())
-                    self.history[f"tgt_val_{metric_name}"].append(tgt_metric_avgs[metric].result().numpy())
+                for metric_name in self.metrics:
+                    self.history[f"src_val_{metric_name}"].append(src_metric_avgs[metric_name].result().numpy())
+                    self.history[f"tgt_val_{metric_name}"].append(tgt_metric_avgs[metric_name].result().numpy())
 
                 if verbose:
                     print(f"finished in {timer()-t1:.0f} seconds")

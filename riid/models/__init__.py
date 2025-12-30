@@ -5,7 +5,7 @@
 from riid.models.bayes import PoissonBayesClassifier
 from riid.models.neural_nets import LabelProportionEstimator, MLPClassifier
 from riid.models.neural_nets import MLP, CNN, TBNN, BaselineTBNN, LSTMClassifier
-from riid.models.neural_nets import DANN, ADDA, DeepCORAL, DeepJDOT, DAN
+from riid.models.neural_nets import ADDA, DAN, DANN, DeepCORAL, DeepJDOT, MeanTeacher, SimCLR
 from riid.models.neural_nets.arad import ARADLatentPredictor, ARADv1, ARADv2
 
 __all__ = ["PoissonBayesClassifier", "LabelProportionEstimator", "MLPClassifier",

@@ -32,6 +32,12 @@ def extract_patches(x, patch_size, stride):
         axis=1
     )
 
+@register_keras_serializable(package="Custom", name="poisson_resample")
+def poisson_resample(x, effective_counts):
+    lam = effective_counts * x
+    c = tf.random.poisson(shape=[], lam=lam)
+    return tf.cast(c, tf.float32)  
+
 
 @register_keras_serializable(package="Custom", name="add_sinusoidal_pos")
 def add_sinusoidal_pos(x, num_patches, embed_dim):
