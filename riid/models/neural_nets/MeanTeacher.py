@@ -316,9 +316,7 @@ class MeanTeacher(PyRIIDModel):
                     
                     # Consistency loss between student and teacher on target data
                     y_t_pred_student = self.student_model(x_t_val, training=False)
-                    consistency_val_loss = tf.reduce_mean(
-                        self.consistency_loss(y_t_pred_teacher, y_t_pred_student)
-                    )
+                    consistency_val_loss = self.consistency_loss(y_t_pred_teacher, y_t_pred_student)
                     consistency_val_loss_avg.update_state(consistency_val_loss)
                     
                     for metric_name, metric_fn in self.metrics.items():
@@ -427,9 +425,7 @@ class MeanTeacher(PyRIIDModel):
             # Consistency loss on target data (student vs teacher)
             student_preds_t = self.student_model(x_t_student, training=True)
             teacher_preds_t = self.teacher_model(x_t_teacher, training=False)
-            consistency_loss = tf.reduce_mean(
-                self.consistency_loss(teacher_preds_t, student_preds_t)
-            )
+            consistency_loss = self.consistency_loss(teacher_preds_t, student_preds_t)
 
             total_loss = class_loss + self.consistency_weight * consistency_loss
 
