@@ -420,21 +420,27 @@ class DANN(PyRIIDModel):
     @tf.function
     def train_feature_extractor_step(self, x_s, y_s, x_t):
         with tf.GradientTape() as tape:
-            # class loss
+            # class loss (source only)
             f_s = self.feature_extractor(x_s, training=True)
             preds = self.classifier(f_s, training=True)
             class_loss = self.classification_loss(y_s, preds)
 
-            # adversarial loss
+            # domain loss
             f_t = self.feature_extractor(x_t, training=True)
-            d_pred_t = self.discriminator(f_t, training=False)
-            # "fake" label = 0 (we want D to predict "source" on target features)
-            fake_labels = tf.zeros_like(d_pred_t)
-            adv_loss = self.discriminator_loss(fake_labels, d_pred_t)
 
-            total_loss = class_loss + adv_loss
+            d_s = self.discriminator(f_s, training=False)
+            d_t = self.discriminator(f_t, training=False)
 
-        # gradients on feature_extractor + classifier only
+            y_s_dom = tf.zeros_like(d_s)
+            y_t_dom = tf.ones_like(d_t)
+
+            domain_loss = (
+                self.discriminator_loss(y_s_dom, d_s) +
+                self.discriminator_loss(y_t_dom, d_t)
+            )
+
+            total_loss = class_loss + domain_loss
+
         variables = self.feature_extractor.trainable_variables + self.classifier.trainable_variables
         grads = tape.gradient(total_loss, variables)
         self.f_optimizer.apply_gradients(zip(grads, variables))
